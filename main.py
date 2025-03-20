@@ -213,6 +213,18 @@ async def mailer(call: CallbackQuery, state: FSMContext):
                 success += 1
             except:
                 bad += 1
+    if m_type == "animation":
+        for user in users:
+            try:
+                await call.bot.send_animation(
+                    chat_id=user[0],
+                    caption=txt,
+                    animation=file_id
+                )
+                success += 1
+            except:
+                bad += 1
+
     if m_type == "text":
         for user in users:
             try:
