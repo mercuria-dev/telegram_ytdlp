@@ -29,21 +29,35 @@ def crop_to_square(image_path, out_path):
         img.save(out_path)
 
 def sanitize_filename(text):
-    sanitized_text = re.sub(r'[\\/:"*?<>|]+', '', text)
-    sanitized_text = sanitized_text.replace(' ', '_')
-    return sanitized_text
+    if not text:
+        return ""
+    sanitized_text = text.strip()
+    sanitized_text = re.sub(r'[\\/:"*?<>|]+', '', sanitized_text)
+    sanitized_text = re.sub(r'%+', '', sanitized_text)
+    sanitized_text = re.sub(r'[\x00-\x1f]', '', sanitized_text)
+    sanitized_text = re.sub(r'\s+', '_', sanitized_text)
+    sanitized_text = re.sub(r'_+', '_', sanitized_text)
+    return sanitized_text[:200]
 
 def download_audio(video_url, output_path, user_id, thumb, bot_username):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
+        if not output_path.lower().endswith('.mp3'):
+            output_path = output_path + '.mp3'
+
+        base_name = os.path.basename(output_path)
+        base_no_ext = os.path.splitext(base_name)[0]
+        safe_base = sanitize_filename(base_no_ext)
+        outtmpl = os.path.join('downloads', safe_base)
+
         ydl_opts = {
-            'format': 'bestaudio/best', 
+            'format': 'bestaudio/best',
             'postprocessors': [
                 {
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
-                    'preferredquality': '320',
+                    'preferredquality': '128',
                 },
                 {
                     'key': 'FFmpegMetadata',
@@ -52,25 +66,48 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username):
                     'key': 'EmbedThumbnail',
                 }
             ],
-            'outtmpl': output_path[:-4],
+            'outtmpl': outtmpl,
             'writethumbnail': True,
+            'keepvideo': False,
         }
         ydl_opts['cookiefile'] = 'cookies/youtube.txt'
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
-        audio_thumb = f"{thumb[:-4]}_audio.jpg"
-        try:
-            crop_to_square(thumb, audio_thumb)
-        except:
-            pass
+        possible_thumb = None
+        for ext in ('.jpg', '.jpeg', '.webp', '.png'):
+            candidate = outtmpl + ext
+            if os.path.exists(candidate):
+                possible_thumb = candidate
+                break
+
+        audio_thumb = None
+        if possible_thumb:
+            audio_thumb = outtmpl + '_audio.jpg'
+            try:
+                crop_to_square(possible_thumb, audio_thumb)
+            except Exception:
+                audio_thumb = possible_thumb
+        else:
+            if thumb and os.path.exists(thumb):
+                audio_thumb = outtmpl + '_audio.jpg'
+                try:
+                    crop_to_square(thumb, audio_thumb)
+                except Exception:
+                    audio_thumb = thumb
         app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
         app.start()
+        produced_mp3 = outtmpl + '.mp3'
         try:
-            app.send_audio(chat_id=user_id, audio=output_path, thumb=audio_thumb, title=output_path[:-4].replace("downloads/", ""), caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+            app.send_audio(chat_id=user_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
         except:
-            app.send_audio(chat_id=user_id, audio=output_path, title=output_path[:-4].replace("downloads/", ""), caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+            try:
+                app.send_audio(chat_id=user_id, audio=output_path, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+            except Exception as e:
+                print(f"Failed to send audio: {e}")
         app.stop()
-        delete_file(audio_thumb)
+        if audio_thumb:
+            delete_file(audio_thumb)
+        delete_file(produced_mp3)
     except Exception as e:
         print(e)
     db.set_work(user_id, 0)
