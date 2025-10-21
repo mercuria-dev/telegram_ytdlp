@@ -144,6 +144,46 @@ def delete_file(f_path):
             pass
         time.sleep(5)
 
+
+def ensure_jpg_thumb(thumb_path, video_path, out_base):
+    if not out_base:
+        return None
+    target = os.path.join('downloads', f"{out_base}_thumb.jpg")
+    try:
+        if thumb_path and os.path.exists(thumb_path):
+            try:
+                with Image.open(thumb_path) as im:
+                    rgb = im.convert('RGB')
+                    max_w = 1280
+                    if rgb.width > max_w:
+                        h = int(max_w * rgb.height / rgb.width)
+                        rgb = rgb.resize((max_w, h), Image.LANCZOS)
+                    rgb.save(target, format='JPEG', quality=85)
+                    return target
+            except Exception:
+                pass
+
+        if video_path and os.path.exists(video_path):
+            try:
+                cmd = [
+                    'ffmpeg', '-y', '-i', video_path,
+                    '-ss', '00:00:01', '-vframes', '1',
+                    '-q:v', '2', target
+                ]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(target):
+                    try:
+                        with Image.open(target) as im2:
+                            im2.convert('RGB')
+                        return target
+                    except Exception:
+                        delete_file(target)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
 def simple_downloader(url, output_path, user_id, domain, video_format=None, title_orig="", thumb=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -173,7 +213,35 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                     height = f['height']
             app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
             app.start()
-            app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+            def optimize_video_for_telegram(src_path):
+                if not os.path.exists(src_path):
+                    return src_path
+                base = os.path.splitext(os.path.basename(src_path))[0]
+                out = os.path.join('downloads', f"{base}_opt.mp4")
+                cmd = [
+                    'ffmpeg', '-y', '-i', src_path,
+                    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1',
+                    '-c:v', 'libx264', '-profile:v', 'baseline', '-level', '3.1',
+                    '-preset', 'fast', '-crf', '23',
+                    '-movflags', '+faststart',
+                    '-c:a', 'copy', out
+                ]
+                try:
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    if os.path.exists(out):
+                        return out
+                except Exception:
+                    pass
+                return src_path
+
+            optimized = optimize_video_for_telegram(output_path)
+            base_name = os.path.splitext(os.path.basename(optimized))[0]
+            safe_base = sanitize_filename(base_name)
+            norm_thumb = ensure_jpg_thumb(thumb, optimized, safe_base)
+            if norm_thumb:
+                app.send_video(chat_id=user_id, video=optimized, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+            else:
+                app.send_video(chat_id=user_id, video=optimized, caption=title_orig, thumb=thumb, width=width, height=height)
             app.stop()
     except:
         try:
