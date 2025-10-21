@@ -213,35 +213,13 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                     height = f['height']
             app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
             app.start()
-            def optimize_video_for_telegram(src_path):
-                if not os.path.exists(src_path):
-                    return src_path
-                base = os.path.splitext(os.path.basename(src_path))[0]
-                out = os.path.join('downloads', f"{base}_opt.mp4")
-                cmd = [
-                    'ffmpeg', '-y', '-i', src_path,
-                    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1',
-                    '-c:v', 'libx264', '-profile:v', 'baseline', '-level', '3.1',
-                    '-preset', 'fast', '-crf', '23',
-                    '-movflags', '+faststart',
-                    '-c:a', 'copy', out
-                ]
-                try:
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                    if os.path.exists(out):
-                        return out
-                except Exception:
-                    pass
-                return src_path
-
-            optimized = optimize_video_for_telegram(output_path)
-            base_name = os.path.splitext(os.path.basename(optimized))[0]
+            base_name = os.path.splitext(os.path.basename(output_path))[0]
             safe_base = sanitize_filename(base_name)
-            norm_thumb = ensure_jpg_thumb(thumb, optimized, safe_base)
+            norm_thumb = ensure_jpg_thumb(thumb, output_path, safe_base)
             if norm_thumb:
-                app.send_video(chat_id=user_id, video=optimized, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+                app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
             else:
-                app.send_video(chat_id=user_id, video=optimized, caption=title_orig, thumb=thumb, width=width, height=height)
+                app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
             app.stop()
     except:
         try:
