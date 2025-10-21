@@ -29,4 +29,4 @@ typing_extensions==4.12.2
 urllib3==2.2.1
 websockets==12.0
 yarl==1.9.4
-yt-dlp==2025.9.26
+yt-dlp==2025.10.14
