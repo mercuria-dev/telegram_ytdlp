@@ -16,6 +16,7 @@ from downloader import *
 import threading
 import requests
 import random
+import config
 
 db = DataBase()
 with open("start.txt", "rt", encoding="utf-8") as start_file:
@@ -237,6 +238,22 @@ async def mailer(call: CallbackQuery, state: FSMContext):
                 bad += 1
     await call.message.answer(f"Success: {success}\nBad: {bad}")
 
+
+async def check_subscription(call: CallbackQuery):
+    try:
+        user_id = call.from_user.id
+        ch_id = config.channel_id
+        member = await call.bot.get_chat_member(chat_id=ch_id, user_id=user_id)
+        status = member.status
+        if status in ["member", "administrator", "creator"]:
+            await call.message.delete()
+            await call.message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+        else:
+            await call.answer("Subscribe to channel for using bot", show_alert=True)
+    except Exception as e:
+        await call.answer("Failed to check subscription. Please try again later.", show_alert=True)
+        print(f"check_subscription error: {e}")
+
 async def main():
     db.reset_work()
     clear_downloads()
@@ -251,6 +268,7 @@ async def main():
     dp.message.register(confirm_mail, CatchMessageState.message)
     dp.callback_query.register(mailer, F.data.startswith("mailer"))
     dp.callback_query.register(youtube_download, F.data.startswith("youtube_download"))
+    dp.callback_query.register(check_subscription, F.data == "check_subscription")
     dp.message.register(all)
 
     print("Bot started")

@@ -7,6 +7,7 @@ import config
 def sub_kb():
     keyboard_builder = InlineKeyboardBuilder()
     keyboard_builder.button(text="Subscribe to channel", url=config.channel_link)
+    keyboard_builder.button(text="Check subscription", callback_data="check_subscription")
     keyboard_builder.adjust(1)
     return keyboard_builder.as_markup()
 
