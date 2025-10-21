@@ -71,8 +71,31 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username):
             'keepvideo': False,
         }
         ydl_opts['cookiefile'] = 'cookies/youtube.txt'
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+        # retry loop for downloads
+        max_retries = 10
+        last_exc = None
+        for attempt in range(1, max_retries + 1):
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    ydl.download([video_url])
+                    last_exc = None
+                    break
+                except yt_dlp.utils.DownloadError as de:
+                    last_exc = de
+                    time.sleep(4)
+                    continue
+        if last_exc is not None:
+            try:
+                app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                app.start()
+                msg = str(last_exc)
+                app.send_message(chat_id=user_id, text=f"Ошибка скачивания после {max_retries} попыток: {msg}")
+                app.stop()
+            except Exception:
+                pass
+            db.set_work(user_id, 0)
+            delete_file(output_path)
+            return
         possible_thumb = None
         for ext in ('.jpg', '.jpeg', '.webp', '.png'):
             candidate = outtmpl + ext
@@ -201,26 +224,55 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
             ydl_opts['merge_output_format'] = "mp4"
 
         ydl_opts['cookiefile'] = 'cookies/youtube.txt'
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            info_dict = ydl.extract_info(url, download=False)
-            width = 0
-            height = 0
-            fs = info_dict['formats']
-            for f in fs:
-                if f['format_id'] == video_format:
-                    width = f['width']
-                    height = f['height']
-            app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-            app.start()
-            base_name = os.path.splitext(os.path.basename(output_path))[0]
-            safe_base = sanitize_filename(base_name)
-            norm_thumb = ensure_jpg_thumb(thumb, output_path, safe_base)
-            if norm_thumb:
-                app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
-            else:
-                app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
-            app.stop()
+        max_retries = 10
+        last_exc = None
+        for attempt in range(1, max_retries + 1):
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    ydl.download([url])
+                    last_exc = None
+                    break
+                except yt_dlp.utils.DownloadError as de:
+                    last_exc = de
+                    time.sleep(4)
+                    continue
+        if last_exc is not None:
+            try:
+                app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                app.start()
+                msg = str(last_exc)
+                app.send_message(chat_id=user_id, text=f"Ошибка скачивания после {max_retries} попыток: {msg}")
+                app.stop()
+            except Exception:
+                pass
+            db.set_work(user_id, 0)
+            delete_file(output_path)
+            return
+
+        try:
+            with yt_dlp.YoutubeDL({'cookiefile': 'cookies/youtube.txt'}) as ydl_info:
+                info_dict = ydl_info.extract_info(url, download=False)
+        except Exception:
+            info_dict = {}
+
+        width = 0
+        height = 0
+        fs = info_dict.get('formats', [])
+        for f in fs:
+            if f.get('format_id') == video_format:
+                width = f.get('width', 0) or 0
+                height = f.get('height', 0) or 0
+
+        app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+        app.start()
+        base_name = os.path.splitext(os.path.basename(output_path))[0]
+        safe_base = sanitize_filename(base_name)
+        norm_thumb = ensure_jpg_thumb(thumb, output_path, safe_base)
+        if norm_thumb:
+            app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+        else:
+            app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+        app.stop()
     except:
         try:
             if domain in ["instagram.com", "twitter.com", "x.com"]:
