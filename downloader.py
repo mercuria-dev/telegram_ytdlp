@@ -1,6 +1,7 @@
 
 import yt_dlp
 from pyrogram import Client, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import config
 import os
 import asyncio
@@ -39,7 +40,7 @@ def sanitize_filename(text):
     sanitized_text = re.sub(r'_+', '_', sanitized_text)
     return sanitized_text[:200]
 
-def download_audio(video_url, output_path, user_id, thumb, bot_username):
+def download_audio(video_url, output_path, user_id, thumb, bot_username, payment_payload=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -89,7 +90,12 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username):
                 app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                 app.start()
                 msg = str(last_exc)
-                app.send_message(chat_id=user_id, text=f"Ошибка скачивания после {max_retries} попыток: {msg}")
+                kb = None
+                if payment_payload:
+                    kb = InlineKeyboardMarkup(
+                        [[InlineKeyboardButton(f"🔄 Refund {config.stars_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                    )
+                app.send_message(chat_id=user_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
                 app.stop()
             except Exception:
                 pass
@@ -132,7 +138,18 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username):
             delete_file(audio_thumb)
         delete_file(produced_mp3)
     except Exception as e:
-        print(e)
+        try:
+            app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+            app.start()
+            kb = None
+            if payment_payload:
+                kb = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(f"🔄 Refund {config.stars_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                )
+            app.send_message(chat_id=user_id, text=f"Download error: {e}", reply_markup=kb)
+            app.stop()
+        except Exception:
+            pass
     db.set_work(user_id, 0)
     delete_file(output_path)
 
@@ -207,7 +224,7 @@ def ensure_jpg_thumb(thumb_path, video_path, out_base):
         pass
     return None
 
-def simple_downloader(url, output_path, user_id, domain, video_format=None, title_orig="", thumb=None):
+def simple_downloader(url, output_path, user_id, domain, video_format=None, title_orig="", thumb=None, payment_payload=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -241,7 +258,12 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                 app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                 app.start()
                 msg = str(last_exc)
-                app.send_message(chat_id=user_id, text=f"Ошибка скачивания после {max_retries} попыток: {msg}")
+                kb = None
+                if payment_payload:
+                    kb = InlineKeyboardMarkup(
+                        [[InlineKeyboardButton(f"🔄 Refund {config.stars_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                    )
+                app.send_message(chat_id=user_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
                 app.stop()
             except Exception:
                 pass
@@ -273,7 +295,7 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
         else:
             app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
         app.stop()
-    except:
+    except Exception as e:
         try:
             if domain in ["instagram.com", "twitter.com", "x.com"]:
                 output_path = output_path.replace("mp4", "jpg")
@@ -289,7 +311,18 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                 app.start()
                 app.send_photo(chat_id=user_id, photo=output_path)
                 app.stop()
-        except:
-            pass
+        except Exception:
+            try:
+                app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                app.start()
+                kb = None
+                if payment_payload:
+                    kb = InlineKeyboardMarkup(
+                        [[InlineKeyboardButton(f"🔄 Refund {config.stars_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                    )
+                app.send_message(chat_id=user_id, text=f"Download error: {e}", reply_markup=kb)
+                app.stop()
+            except Exception:
+                pass
     db.set_work(user_id, 0)
     delete_file(output_path)

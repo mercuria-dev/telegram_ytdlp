@@ -39,20 +39,36 @@ def youtube_formats_kb(formats):
             continue
 
     sorted_notes = sorted(best_by_note.items(), key=lambda kv: int(kv[0].rstrip('p')))
+    btn_720 = None
+    btn_1080 = None
+    # Add all buttons except 720p/1080p first
     for note, f in sorted_notes:
         format_id = f['format_id']
         size = f.get('filesize', 0)
-        keyboard_builder.button(text=note, callback_data=f"youtube_download:{format_id}:{size}")
+        if note == "720p":
+            btn_720 = types.InlineKeyboardButton(text=f"720p ({config.stars_price}⭐)", callback_data=f"youtube_download:{format_id}:{size}:{note}")
+            continue
+        if note == "1080p":
+            btn_1080 = types.InlineKeyboardButton(text=f"1080p ({config.stars_price}⭐)", callback_data=f"youtube_download:{format_id}:{size}:{note}")
+            continue
+        keyboard_builder.button(text=note, callback_data=f"youtube_download:{format_id}:{size}:{note}")
 
+    # Arrange the non-paid buttons in rows
     keyboard_builder.adjust(6)
+    # Put 720p and 1080p each on a new line if they exist
+    if btn_720 is not None:
+        keyboard_builder.row(btn_720)
+    if btn_1080 is not None:
+        keyboard_builder.row(btn_1080)
+    # Audio row
     keyboard_builder.row(
-        types.InlineKeyboardButton(text="🎧 Аудио", callback_data="youtube_download:audio:0"),
+        types.InlineKeyboardButton(text=f"🎧 Audio ({config.stars_price}⭐)", callback_data="youtube_download:audio:0:audio"),
     )
     return keyboard_builder.as_markup()
 
 def confirm_mail_kb():
     keyboard_builder = InlineKeyboardBuilder()
-    keyboard_builder.button(text="Да", callback_data=f"mailer:1")
-    keyboard_builder.button(text="Нет", callback_data=f"mailer:0")
+    keyboard_builder.button(text="Yes", callback_data=f"mailer:1")
+    keyboard_builder.button(text="No", callback_data=f"mailer:0")
     keyboard_builder.adjust(2)
     return keyboard_builder.as_markup()

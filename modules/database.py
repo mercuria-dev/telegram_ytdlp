@@ -17,6 +17,16 @@ class DataBase:
                     work    INTEGER DEFAULT (0)
                 );
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    payload TEXT NOT NULL,
+                    charge_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT ('paid'),
+                    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                );
+            ''')
             conn.commit()
             conn.close()
         except sqlite3.Error as e:
@@ -38,6 +48,25 @@ class DataBase:
 
     def reset_work(self):
         self.insert_delete_request(f"UPDATE users set work = 0")
+
+    # payments
+    def add_payment(self, user_id: int, payload: str, charge_id: str):
+        self.insert_delete_request(
+            "INSERT INTO payments (user_id, payload, charge_id, status) VALUES (?, ?, ?, 'paid')",
+            (user_id, payload, charge_id)
+        )
+
+    def get_payment_by_payload(self, payload: str):
+        return self.select_request(
+            "SELECT id, user_id, payload, charge_id, status FROM payments WHERE payload = ? ORDER BY id DESC LIMIT 1",
+            (payload,), one=True
+        )
+
+    def mark_payment_refunded(self, payload: str):
+        self.insert_delete_request(
+            "UPDATE payments SET status = 'refunded' WHERE payload = ?",
+            (payload,)
+        )
 
     # Структура для выполнения select запросов
     def select_request(self, query, params=(), one=False):
