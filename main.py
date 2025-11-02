@@ -51,8 +51,10 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
     if int(size) >= max_size:
         await call.message.answer("File is too large. Try another")
         return 
-    # Determine if this selection requires payment (1 Star for 720p, 1080p, and audio)
-    requires_payment = (format == "audio") or (note in ("720p", "1080p"))
+    # Determine if this selection requires payment (Stars for 720p, 1080p, and audio)
+    _wl = {s.strip() for s in config.free_whitelist if s.strip()}
+    is_whitelisted = str(call.from_user.id) in _wl
+    requires_payment = (not is_whitelisted) and ((format == "audio") or (note in ("720p", "1080p")))
 
     if requires_payment:
         # Store the pending purchase details in state for fulfillment upon payment
@@ -166,7 +168,10 @@ async def all(message: Message, state: FSMContext):
                 await state.update_data(domain=domain)
                 await state.update_data(video_path=video_path)
                 await state.update_data(thumbnail_path=thumbnail_path)
-                kb = youtube_formats_kb(formats)
+                # Show free labels for whitelisted users
+                _wl = {s.strip() for s in config.free_whitelist if s.strip()}
+                free_user = str(message.from_user.id) in _wl
+                kb = youtube_formats_kb(formats, free=free_user)
                 if not thumbnail_url:
                     await message.answer(title, reply_markup=kb)
                 else:

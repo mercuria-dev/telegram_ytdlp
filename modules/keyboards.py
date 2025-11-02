@@ -14,7 +14,7 @@ def sub_kb():
 def remove_kb():
     return ReplyKeyboardRemove()
 
-def youtube_formats_kb(formats):
+def youtube_formats_kb(formats, free: bool = False):
     keyboard_builder = InlineKeyboardBuilder()
     best_by_note = {}
     for f in formats:
@@ -46,10 +46,12 @@ def youtube_formats_kb(formats):
         format_id = f['format_id']
         size = f.get('filesize', 0)
         if note == "720p":
-            btn_720 = types.InlineKeyboardButton(text=f"720p ({config.stars_price}⭐)", callback_data=f"youtube_download:{format_id}:{size}:{note}")
+            label = "720p" if free else f"720p ({config.stars_price}⭐)"
+            btn_720 = types.InlineKeyboardButton(text=label, callback_data=f"youtube_download:{format_id}:{size}:{note}")
             continue
         if note == "1080p":
-            btn_1080 = types.InlineKeyboardButton(text=f"1080p ({config.stars_price}⭐)", callback_data=f"youtube_download:{format_id}:{size}:{note}")
+            label = "1080p" if free else f"1080p ({config.stars_price}⭐)"
+            btn_1080 = types.InlineKeyboardButton(text=label, callback_data=f"youtube_download:{format_id}:{size}:{note}")
             continue
         keyboard_builder.button(text=note, callback_data=f"youtube_download:{format_id}:{size}:{note}")
 
@@ -62,7 +64,7 @@ def youtube_formats_kb(formats):
         keyboard_builder.row(btn_1080)
     # Audio row
     keyboard_builder.row(
-        types.InlineKeyboardButton(text=f"🎧 Audio ({config.stars_price}⭐)", callback_data="youtube_download:audio:0:audio"),
+        types.InlineKeyboardButton(text=("🎧 Audio" if free else f"🎧 Audio ({config.stars_price}⭐)"), callback_data="youtube_download:audio:0:audio"),
     )
     return keyboard_builder.as_markup()
 
