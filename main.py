@@ -43,21 +43,28 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
     video_path = data['video_path']
     thumbnail_path = data['thumbnail_path']
     title = sanitize_filename(data['title'])
+    premium_mode = bool(data.get('premium'))
     parts = call.data.split(":")
-    # Expected: youtube_download:format_id:size:note OR youtube_download:audio:0:audio
     _, format, size = parts[:3]
     note = parts[3] if len(parts) > 3 else None
     max_size = 2 * 1024 * 1024 * 1024
     if int(size) >= max_size:
         await call.message.answer("File is too large. Try another")
         return 
-    # Determine if this selection requires payment (Stars for 720p, 1080p, and audio)
     _wl = {s.strip() for s in config.free_whitelist if s.strip()}
     is_whitelisted = str(call.from_user.id) in _wl
-    requires_payment = (not is_whitelisted) and ((format == "audio") or (note in ("720p", "1080p")))
+    if is_whitelisted:
+        requires_payment = False
+        item_price = 0
+    else:
+        if premium_mode:
+            requires_payment = True
+            item_price = config.stars_premium_price
+        else:
+            requires_payment = (format == "audio") or (note in ("720p", "1080p"))
+            item_price = config.stars_price
 
     if requires_payment:
-        # Store the pending purchase details in state for fulfillment upon payment
         await state.update_data(purchase={
             'type': 'audio' if format == 'audio' else 'video',
             'format': format,
@@ -69,16 +76,17 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             'thumbnail_path': thumbnail_path,
             'title': data['title'],
         })
-        item_title = "YouTube Audio" if format == "audio" else f"YouTube {note or 'video'}"
-        prices = [LabeledPrice(label=item_title, amount=config.stars_price)]
-        payload = f"yt:{'audio' if format == 'audio' else 'video'}:{format}:{call.from_user.id}"
+        suffix = ":prem" if premium_mode else ""
+        item_title = ("YouTube Audio" if format == "audio" else f"YouTube {note or 'video'}") + (" • Premium" if premium_mode else "")
+        prices = [LabeledPrice(label=item_title, amount=item_price)]
+        payload = f"yt:{'audio' if format == 'audio' else 'video'}:{format}:{call.from_user.id}{suffix}"
         await state.update_data(purchase_payload=payload)
         try:
             await call.message.answer_invoice(
                 title=item_title,
-                description=f"Pay {config.stars_price} ⭐ to download",
+                description=f"Pay {item_price} ⭐ to download",
                 payload=payload,
-                provider_token=None,  # Not required for Telegram Stars
+                provider_token=None,
                 currency="XTR",
                 prices=prices
             )
@@ -87,7 +95,6 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             print(f"Invoice error: {e}")
         return
 
-    # Free download path for other qualities
     db.set_work(call.from_user.id, 1)
     await call.message.answer("Download started")
     if format != "audio":
@@ -149,13 +156,6 @@ async def all(message: Message, state: FSMContext):
                 if info_dict['live_status'] == 'is_live':
                     await message.answer("Live streams are restricted!")
                     return
-                # Formats logs
-                '''
-                for f in formats:
-                    print(f"Format code: {f['format_id']}, Extension: {f['ext']}, "
-                        f"Resolution: {f.get('resolution', 'N/A')}, "
-                        f"Note: {f.get('format_note', 'N/A')}, "
-                        f"Filesize: {f.get('filesize', 'N/A')}")'''
 
                 thumbnail_url = info_dict.get('thumbnail', None)
                 thumbnail_path = video_path.replace("mp4", "jpg")
@@ -168,14 +168,25 @@ async def all(message: Message, state: FSMContext):
                 await state.update_data(domain=domain)
                 await state.update_data(video_path=video_path)
                 await state.update_data(thumbnail_path=thumbnail_path)
-                # Show free labels for whitelisted users
+                try:
+                    public_ok = is_youtube_public(link)
+                except Exception:
+                    public_ok = False
+                premium_mode = not public_ok
+                await state.update_data(premium=premium_mode)
                 _wl = {s.strip() for s in config.free_whitelist if s.strip()}
-                free_user = str(message.from_user.id) in _wl
-                kb = youtube_formats_kb(formats, free=free_user)
+                is_whitelisted = str(message.from_user.id) in _wl
+                free_user = is_whitelisted
+                force_paid = premium_mode and (not is_whitelisted)
+                price_for_buttons = config.stars_premium_price if premium_mode else config.stars_price
+                kb = youtube_formats_kb(formats, free=free_user, force_paid=force_paid, price=price_for_buttons)
+                caption_text = title
+                if premium_mode:
+                    caption_text += f"\n\nNote: This video is age-restricted (18+) or has limited access on YouTube and is only accessible with cookies. All download options require {config.stars_premium_price} ⭐."
                 if not thumbnail_url:
-                    await message.answer(title, reply_markup=kb)
+                    await message.answer(caption_text, reply_markup=kb)
                 else:
-                    await message.answer_photo(thumbnail_url, title, reply_markup=kb)
+                    await message.answer_photo(thumbnail_url, caption_text, reply_markup=kb)
             else:
                 if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1:
                     db.set_work(message.from_user.id, 1)
@@ -191,7 +202,6 @@ async def all(message: Message, state: FSMContext):
 
 
 async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
-    # Required: answer pre-checkout query
     try:
         await pre_checkout_q.bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
     except Exception as e:
@@ -210,13 +220,11 @@ async def on_successful_payment(message: Message, state: FSMContext):
         if not purchase:
             await message.answer("Couldn't find your order. Please send the link again.")
             return
-        # Save payment info for potential refunds
         try:
             if charge_id:
                 db.add_payment(user_id=message.from_user.id, payload=payload, charge_id=charge_id)
         except Exception as e:
             print(f"Failed to save payment: {e}")
-        # Start the actual download now
         link = purchase['link']
         domain = purchase['domain']
         video_path = purchase['video_path']
@@ -236,7 +244,6 @@ async def on_successful_payment(message: Message, state: FSMContext):
             bot_username = bot_info.username
             t = threading.Thread(target=download_audio, args=(link, audio_path, message.from_user.id, thumbnail_path, bot_username, purchase_payload))
             t.start()
-        # Clear purchase from state
         await state.update_data(purchase=None)
         await state.update_data(purchase_payload=None)
     except Exception as e:
@@ -410,7 +417,6 @@ async def main():
     dp.callback_query.register(mailer, F.data.startswith("mailer"))
     dp.callback_query.register(youtube_download, F.data.startswith("youtube_download"))
     dp.callback_query.register(refund_handler, F.data.startswith("refund:"))
-    # Payments handlers
     dp.pre_checkout_query.register(pre_checkout_handler)
     dp.message.register(on_successful_payment, F.successful_payment)
     dp.callback_query.register(check_subscription, F.data == "check_subscription")

@@ -72,7 +72,7 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username, payment
             'keepvideo': False,
         }
         ydl_opts['cookiefile'] = 'cookies/youtube.txt'
-        # retry loop for downloads
+
         max_retries = 10
         last_exc = None
         for attempt in range(1, max_retries + 1):
@@ -92,8 +92,9 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username, payment
                 msg = str(last_exc)
                 kb = None
                 if payment_payload:
+                    pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
                     kb = InlineKeyboardMarkup(
-                        [[InlineKeyboardButton(f"🔄 Refund {config.stars_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                        [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
                     )
                 app.send_message(chat_id=user_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
                 app.stop()
@@ -143,8 +144,9 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username, payment
             app.start()
             kb = None
             if payment_payload:
+                pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
                 kb = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(f"🔄 Refund {config.stars_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                    [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
                 )
             app.send_message(chat_id=user_id, text=f"Download error: {e}", reply_markup=kb)
             app.stop()
@@ -167,6 +169,30 @@ def get_video_formats(url, domain):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info_dict = ydl.extract_info(url, download=False)
         return info_dict
+
+def is_youtube_public(url: str) -> bool:
+    try:
+        with yt_dlp.YoutubeDL({'listformats': True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        return False
+    fmts = info.get('formats', []) if isinstance(info, dict) else []
+    for f in fmts:
+        try:
+            if f.get('vcodec') == 'images':
+                continue
+
+            proto = (f.get('protocol') or '').lower()
+            if not proto:
+                continue
+
+            if proto in ('m3u8', 'm3u8_native', 'https', 'http', 'dash', 'http_dash_segments'):
+                ext = (f.get('ext') or '').lower()
+                if ext in ('mp4', 'webm', 'm4a'):
+                    return True
+        except Exception:
+            continue
+    return False
 
 def get_domain(url):
     domain_pattern = r'^(https?:\/\/)?(www\.)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(\/.*)?$'
@@ -237,8 +263,23 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
             ydl_opts['quiet'] = True
 
         elif domain.startswith("youtu"):
-            ydl_opts['format'] = video_format+"+bestaudio"
-            ydl_opts['merge_output_format'] = "mp4"
+            try:
+                with yt_dlp.YoutubeDL({'cookiefile': 'cookies/youtube.txt'}) as probe:
+                    info = probe.extract_info(url, download=False)
+            except Exception:
+                info = {}
+            fmts = info.get('formats', []) if isinstance(info, dict) else []
+            selected = None
+            for f in fmts:
+                if str(f.get('format_id')) == str(video_format):
+                    selected = f
+                    break
+
+            if selected and selected.get('acodec') and selected.get('acodec') != 'none':
+                ydl_opts['format'] = str(video_format)
+            else:
+                ydl_opts['format'] = f"{video_format}+bestaudio/best"
+                ydl_opts['merge_output_format'] = "mp4"
 
         ydl_opts['cookiefile'] = 'cookies/youtube.txt'
         max_retries = 10
@@ -260,8 +301,9 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                 msg = str(last_exc)
                 kb = None
                 if payment_payload:
+                    pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
                     kb = InlineKeyboardMarkup(
-                        [[InlineKeyboardButton(f"🔄 Refund {config.stars_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                        [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
                     )
                 app.send_message(chat_id=user_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
                 app.stop()
@@ -317,8 +359,9 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                 app.start()
                 kb = None
                 if payment_payload:
+                    pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
                     kb = InlineKeyboardMarkup(
-                        [[InlineKeyboardButton(f"🔄 Refund {config.stars_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                        [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
                     )
                 app.send_message(chat_id=user_id, text=f"Download error: {e}", reply_markup=kb)
                 app.stop()
