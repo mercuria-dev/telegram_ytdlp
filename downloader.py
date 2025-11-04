@@ -10,6 +10,7 @@ import time
 from modules.database import DataBase
 import subprocess
 from PIL import Image
+import glob
 
 db = DataBase()
 
@@ -40,7 +41,7 @@ def sanitize_filename(text):
     sanitized_text = re.sub(r'_+', '_', sanitized_text)
     return sanitized_text[:200]
 
-def download_audio(video_url, output_path, user_id, thumb, bot_username, payment_payload=None):
+def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment_payload=None, user_id_for_work=None, session_id=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -55,17 +56,9 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username, payment
         ydl_opts = {
             'format': 'bestaudio/best',
             'postprocessors': [
-                {
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '128',
-                },
-                {
-                    'key': 'FFmpegMetadata',
-                },
-                {
-                    'key': 'EmbedThumbnail',
-                }
+                {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '128'},
+                {'key': 'FFmpegMetadata'},
+                {'key': 'EmbedThumbnail'}
             ],
             'outtmpl': outtmpl,
             'writethumbnail': True,
@@ -85,9 +78,11 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username, payment
                     last_exc = de
                     time.sleep(4)
                     continue
+
         if last_exc is not None:
             try:
-                app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                 app.start()
                 msg = str(last_exc)
                 kb = None
@@ -96,13 +91,15 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username, payment
                     kb = InlineKeyboardMarkup(
                         [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
                     )
-                app.send_message(chat_id=user_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
+                app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
                 app.stop()
+                delete_pyrogram_session_files(session_base)
             except Exception:
                 pass
-            db.set_work(user_id, 0)
+            db.set_work(user_id_for_work or chat_id, 0)
             delete_file(output_path)
             return
+
         possible_thumb = None
         for ext in ('.jpg', '.jpeg', '.webp', '.png'):
             candidate = outtmpl + ext
@@ -124,23 +121,27 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username, payment
                     crop_to_square(thumb, audio_thumb)
                 except Exception:
                     audio_thumb = thumb
-        app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+
+        session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+        app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
         app.start()
         produced_mp3 = outtmpl + '.mp3'
         try:
-            app.send_audio(chat_id=user_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+            app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
         except:
             try:
-                app.send_audio(chat_id=user_id, audio=output_path, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+                app.send_audio(chat_id=chat_id, audio=output_path, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
             except Exception as e:
                 print(f"Failed to send audio: {e}")
         app.stop()
+        delete_pyrogram_session_files(session_base)
         if audio_thumb:
             delete_file(audio_thumb)
         delete_file(produced_mp3)
     except Exception as e:
         try:
-            app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+            session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+            app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
             app.start()
             kb = None
             if payment_payload:
@@ -148,11 +149,12 @@ def download_audio(video_url, output_path, user_id, thumb, bot_username, payment
                 kb = InlineKeyboardMarkup(
                     [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
                 )
-            app.send_message(chat_id=user_id, text=f"Download error: {e}", reply_markup=kb)
+            app.send_message(chat_id=chat_id, text=f"Download error: {e}", reply_markup=kb)
             app.stop()
+            delete_pyrogram_session_files(session_base)
         except Exception:
             pass
-    db.set_work(user_id, 0)
+    db.set_work(user_id_for_work or chat_id, 0)
     delete_file(output_path)
 
 def get_video_formats(url, domain):
@@ -250,18 +252,14 @@ def ensure_jpg_thumb(thumb_path, video_path, out_base):
         pass
     return None
 
-def simple_downloader(url, output_path, user_id, domain, video_format=None, title_orig="", thumb=None, payment_payload=None):
+def simple_downloader(url, output_path, chat_id, domain, video_format=None, title_orig="", thumb=None, payment_payload=None, user_id_for_work=None, session_id=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        ydl_opts = {
-            'format': 'best',
-            'outtmpl': output_path
-        }
+        ydl_opts = {'format': 'best', 'outtmpl': output_path}
         if domain == "instagram.com":
             ydl_opts['cookiefile'] = 'cookies/insta.txt'
             ydl_opts['quiet'] = True
-
         elif domain.startswith("youtu"):
             try:
                 with yt_dlp.YoutubeDL({'cookiefile': 'cookies/youtube.txt'}) as probe:
@@ -274,7 +272,6 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                 if str(f.get('format_id')) == str(video_format):
                     selected = f
                     break
-
             if selected and selected.get('acodec') and selected.get('acodec') != 'none':
                 ydl_opts['format'] = str(video_format)
             else:
@@ -294,9 +291,11 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                     last_exc = de
                     time.sleep(4)
                     continue
+
         if last_exc is not None:
             try:
-                app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                 app.start()
                 msg = str(last_exc)
                 kb = None
@@ -305,11 +304,12 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                     kb = InlineKeyboardMarkup(
                         [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
                     )
-                app.send_message(chat_id=user_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
+                app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
                 app.stop()
+                delete_pyrogram_session_files(session_base)
             except Exception:
                 pass
-            db.set_work(user_id, 0)
+            db.set_work(user_id_for_work or chat_id, 0)
             delete_file(output_path)
             return
 
@@ -327,16 +327,18 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                 width = f.get('width', 0) or 0
                 height = f.get('height', 0) or 0
 
-        app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+        session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+        app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
         app.start()
         base_name = os.path.splitext(os.path.basename(output_path))[0]
         safe_base = sanitize_filename(base_name)
         norm_thumb = ensure_jpg_thumb(thumb, output_path, safe_base)
         if norm_thumb:
-            app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+            app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
         else:
-            app.send_video(chat_id=user_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+            app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
         app.stop()
+        delete_pyrogram_session_files(session_base)
     except Exception as e:
         try:
             if domain in ["instagram.com", "twitter.com", "x.com"]:
@@ -349,13 +351,16 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                     url
                 ]
                 subprocess.run(command)
-                app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                 app.start()
-                app.send_photo(chat_id=user_id, photo=output_path)
+                app.send_photo(chat_id=chat_id, photo=output_path)
                 app.stop()
+                delete_pyrogram_session_files(session_base)
         except Exception:
             try:
-                app = Client(f"sessions/{user_id}", bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                 app.start()
                 kb = None
                 if payment_payload:
@@ -363,9 +368,14 @@ def simple_downloader(url, output_path, user_id, domain, video_format=None, titl
                     kb = InlineKeyboardMarkup(
                         [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
                     )
-                app.send_message(chat_id=user_id, text=f"Download error: {e}", reply_markup=kb)
+                app.send_message(chat_id=chat_id, text=f"Download error: {e}", reply_markup=kb)
                 app.stop()
+                delete_pyrogram_session_files(session_base)
             except Exception:
                 pass
-    db.set_work(user_id, 0)
+    db.set_work(user_id_for_work or chat_id, 0)
     delete_file(output_path)
+
+def delete_pyrogram_session_files(session_base: str):
+    # Intentionally disabled: keep Pyrogram sessions persistent per chat_id as requested
+    return

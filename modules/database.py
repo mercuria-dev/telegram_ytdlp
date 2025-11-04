@@ -27,6 +27,13 @@ class DataBase:
                     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
                 );
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS deeplinks (
+                    token TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                );
+            ''')
             conn.commit()
             conn.close()
         except sqlite3.Error as e:
@@ -66,6 +73,26 @@ class DataBase:
         self.insert_delete_request(
             "UPDATE payments SET status = 'refunded' WHERE payload = ?",
             (payload,)
+        )
+
+    # deeplinks
+    def add_deeplink(self, token: str, url: str):
+        self.insert_delete_request(
+            "INSERT OR REPLACE INTO deeplinks (token, url) VALUES (?, ?)",
+            (token, url)
+        )
+
+    def get_deeplink(self, token: str):
+        row = self.select_request(
+            "SELECT url FROM deeplinks WHERE token = ?",
+            (token,), one=True
+        )
+        return row[0] if row else None
+
+    def delete_deeplink(self, token: str):
+        self.insert_delete_request(
+            "DELETE FROM deeplinks WHERE token = ?",
+            (token,)
         )
 
     # Структура для выполнения select запросов

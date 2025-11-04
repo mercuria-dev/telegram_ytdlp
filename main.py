@@ -1,7 +1,9 @@
 import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineQuery
+from aiogram.types import InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultPhoto
+from aiogram.types import InlineKeyboardMarkup as AioInlineKeyboardMarkup, InlineKeyboardButton as AioInlineKeyboardButton
 from aiogram.types import PreCheckoutQuery, LabeledPrice
 import aiohttp
 from aiogram.filters.command import Command
@@ -19,37 +21,99 @@ import threading
 import requests
 import random
 import config
+import string
+import json
 
 db = DataBase()
 with open("start.txt", "rt", encoding="utf-8") as start_file:
     start_msg = start_file.read()
     start_file.close()
 
-async def welcome(message: Message):
+async def welcome(message: Message, state: FSMContext):
+    # Handle deep-link start parameter: /start dl_<token>
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1].startswith("dl_"):
+        token = parts[1]  # token stored with 'dl_' prefix, keep it intact
+        link = db.get_deeplink(token)
+        if not link:
+            await message.answer("Link is invalid or expired.")
+            return
+        # Consume token
+        db.delete_deeplink(token)
+        # Process link as if user sent it directly
+        await process_link_message(message, state, link)
+        return
     await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
 
 async def youtube_download(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     _, work = db.get_user(call.from_user.id)
     if work == 1:
-        await call.message.answer("Wait while your video is downloading")
+        if call.message:
+            await call.message.answer("Wait while your video is downloading")
+        else:
+            await call.answer("Wait while your video is downloading")
         return
 
-    if not data:
-        await call.answer("Send me link again")
-        return
-    link = data['link']
-    domain = data['domain']
-    video_path = data['video_path']
-    thumbnail_path = data['thumbnail_path']
-    title = sanitize_filename(data['title'])
-    premium_mode = bool(data.get('premium'))
+    # Parse callback data: youtube_download:format:size:note[:token]
     parts = call.data.split(":")
     _, format, size = parts[:3]
     note = parts[3] if len(parts) > 3 else None
+    token = None
+    if len(parts) > 4 and parts[-1].startswith("il_"):
+        token = parts[-1]
+
+    # Load context either from FSM or from inline token
+    if not data:
+        context = None
+        if token:
+            try:
+                raw = db.get_deeplink(token)
+                if raw:
+                    context = json.loads(raw)
+                    # Consume token once used
+                    try:
+                        db.delete_deeplink(token)
+                    except Exception:
+                        pass
+            except Exception:
+                context = None
+        if not context:
+            await call.answer("Send me link again", show_alert=True)
+            return
+        link = context.get('link')
+        domain = context.get('domain')
+        title = sanitize_filename(context.get('title') or 'Video')
+        # Make fresh paths for this download
+        random_name = random.randint(10000, 99999)
+        video_path = f"downloads/{random_name}.mp4"
+        thumbnail_path = video_path.replace("mp4", "jpg")
+        thumb_url = context.get('thumbnail_url')
+        try:
+            if thumb_url:
+                response = requests.get(thumb_url)
+                with open(thumbnail_path, 'wb') as file:
+                    file.write(response.content)
+        except Exception:
+            pass
+        try:
+            public_ok = is_youtube_public(link) if domain and 'youtu' in domain else True
+        except Exception:
+            public_ok = True
+        premium_mode = False if public_ok else True
+    else:
+        link = data['link']
+        domain = data['domain']
+        video_path = data['video_path']
+        thumbnail_path = data['thumbnail_path']
+        title = sanitize_filename(data['title'])
+        premium_mode = bool(data.get('premium'))
     max_size = 2 * 1024 * 1024 * 1024
     if int(size) >= max_size:
-        await call.message.answer("File is too large. Try another")
+        if call.message:
+            await call.message.answer("File is too large. Try another")
+        else:
+            await call.answer("File is too large. Try another")
         return 
     _wl = {s.strip() for s in config.free_whitelist if s.strip()}
     is_whitelisted = str(call.from_user.id) in _wl
@@ -64,6 +128,15 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             requires_payment = (format == "audio") or (note in ("720p", "1080p"))
             item_price = config.stars_price
 
+    # After a valid selection, remove the quality menu message to avoid clutter and double clicks
+    # Keep it only when we early-returned (e.g., too large) above.
+    if call.message:
+        try:
+            await call.message.delete()
+        except Exception:
+            # If we can't delete (e.g., already deleted or insufficient rights), ignore and continue
+            pass
+
     if requires_payment:
         await state.update_data(purchase={
             'type': 'audio' if format == 'audio' else 'video',
@@ -74,7 +147,7 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             'domain': domain,
             'video_path': video_path,
             'thumbnail_path': thumbnail_path,
-            'title': data['title'],
+            'title': (data['title'] if data else title),
         })
         suffix = ":prem" if premium_mode else ""
         item_title = ("YouTube Audio" if format == "audio" else f"YouTube {note or 'video'}") + (" • Premium" if premium_mode else "")
@@ -82,7 +155,9 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         payload = f"yt:{'audio' if format == 'audio' else 'video'}:{format}:{call.from_user.id}{suffix}"
         await state.update_data(purchase_payload=payload)
         try:
-            await call.message.answer_invoice(
+            target_chat_id = call.message.chat.id if call.message else call.from_user.id
+            await call.bot.send_invoice(
+                chat_id=target_chat_id,
                 title=item_title,
                 description=f"Pay {item_price} ⭐ to download",
                 payload=payload,
@@ -91,25 +166,45 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
                 prices=prices
             )
         except Exception as e:
-            await call.message.answer("Couldn't create invoice. Please try again later.")
+            if call.message:
+                await call.message.answer("Couldn't create invoice. Please try again later.")
+            else:
+                await call.answer("Couldn't create invoice. Open the bot in PM and try again.", show_alert=True)
             print(f"Invoice error: {e}")
         return
 
     db.set_work(call.from_user.id, 1)
-    await call.message.answer("Download started")
+    if call.message:
+        await call.message.answer("Download started")
+    else:
+        await call.answer("Download started. I'll send it to you in PM.")
+    # Determine target chat for delivery: inline callbacks don't have message/chat, fallback to user's PM
+    target_chat_id = call.message.chat.id if call.message else call.from_user.id
+
+    # Build session_id: prefer chat id when available; for inline fall back to inline_message_id to avoid user-id based sessions
+    sess_id = None
+    if call.message:
+        sess_id = str(call.message.chat.id)
+    else:
+        inl = getattr(call, 'inline_message_id', None)
+        if inl:
+            sess_id = f"inline_{inl}"
+        else:
+            sess_id = str(target_chat_id)
+
     if format != "audio":
-        my_thread = threading.Thread(target=simple_downloader, args=(link, video_path, call.from_user.id, domain, format, data['title'], thumbnail_path))
+        title_for_send = data['title'] if data else title
+        my_thread = threading.Thread(target=simple_downloader, args=(link, video_path, target_chat_id, domain, format, title_for_send, thumbnail_path, None, call.from_user.id, sess_id))
         my_thread.start()
     else:
         audio_path = f"downloads/{title}.mp3"
         bot_info = await call.bot.get_me()
         bot_username = bot_info.username
-        my_thread = threading.Thread(target=download_audio, args=(link, audio_path, call.from_user.id, thumbnail_path, bot_username,))
+        my_thread = threading.Thread(target=download_audio, args=(link, audio_path, target_chat_id, thumbnail_path, bot_username, None, call.from_user.id, sess_id))
         my_thread.start()
 
-async def all(message: Message, state: FSMContext):
+async def process_link_message(message: Message, state: FSMContext, link: str):
     try:
-        link = message.text
         domain = get_domain(link)
         if domain:
             if domain == "vk.com":
@@ -148,7 +243,7 @@ async def all(message: Message, state: FSMContext):
                 bot_info = await message.bot.get_me()
                 bot_username = bot_info.username
 
-                my_thread = threading.Thread(target=download_audio, args=(link, audio_path, message.from_user.id, thumbnail_path, bot_username,))
+                my_thread = threading.Thread(target=download_audio, args=(link, audio_path, message.chat.id, thumbnail_path, bot_username, None, message.from_user.id, str(message.chat.id)))
                 my_thread.start()
                 return
             elif domain.find("youtu") > -1:
@@ -191,7 +286,7 @@ async def all(message: Message, state: FSMContext):
                 if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1:
                     db.set_work(message.from_user.id, 1)
                     await message.answer("Download started")
-                    my_thread = threading.Thread(target=simple_downloader, args=(link, video_path, message.from_user.id, domain, None, title_orig,))
+                    my_thread = threading.Thread(target=simple_downloader, args=(link, video_path, message.chat.id, domain, None, title_orig, None, None, message.from_user.id, str(message.chat.id)))
                     my_thread.start()
                 else:
                     await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
@@ -199,6 +294,23 @@ async def all(message: Message, state: FSMContext):
             await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
     except:
         await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+
+async def all(message: Message, state: FSMContext):
+    try:
+        chat_type = getattr(message.chat, 'type', 'private')
+        text = message.text or ""
+        import re as _re
+        m = _re.search(r'(https?://\S+)', text)
+        link = m.group(1) if m else None
+        if not link:
+            if chat_type in ("group", "supergroup"):
+                return
+            await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+            return
+        await process_link_message(message, state, link)
+    except:
+        if getattr(message.chat, 'type', 'private') not in ("group", "supergroup"):
+            await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
 
 
 async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
@@ -236,13 +348,13 @@ async def on_successful_payment(message: Message, state: FSMContext):
         db.set_work(message.from_user.id, 1)
         await message.answer("Payment received ✅\nStarting download…")
         if fmt != 'audio':
-            t = threading.Thread(target=simple_downloader, args=(link, video_path, message.from_user.id, domain, fmt, purchase['title'], thumbnail_path, purchase_payload))
+            t = threading.Thread(target=simple_downloader, args=(link, video_path, message.chat.id, domain, fmt, purchase['title'], thumbnail_path, purchase_payload, message.from_user.id, str(message.chat.id)))
             t.start()
         else:
             audio_path = f"downloads/{title}.mp3"
             bot_info = await message.bot.get_me()
             bot_username = bot_info.username
-            t = threading.Thread(target=download_audio, args=(link, audio_path, message.from_user.id, thumbnail_path, bot_username, purchase_payload))
+            t = threading.Thread(target=download_audio, args=(link, audio_path, message.chat.id, thumbnail_path, bot_username, purchase_payload, message.from_user.id, str(message.chat.id)))
             t.start()
         await state.update_data(purchase=None)
         await state.update_data(purchase_payload=None)
@@ -386,20 +498,119 @@ async def mailer(call: CallbackQuery, state: FSMContext):
                 bad += 1
     await call.message.answer(f"Success: {success}\nBad: {bad}")
 
+async def inline_query_handler(query: InlineQuery, state: FSMContext):
+    q = (query.query or '').strip()
+    import re as _re
+    m = _re.search(r'(https?://\S+)', q)
+    if not m:
+        result = InlineQueryResultArticle(
+            id='help',
+            title='Paste a link to download',
+            description='Example: https://youtube.com/watch?v=... or other supported link',
+            input_message_content=InputTextMessageContent(message_text='Paste a link to download')
+        )
+        await query.answer([result], cache_time=5, is_personal=True)
+        return
+    link = m.group(1)
+    domain = get_domain(link)
+    title = 'No name'
+    thumb_url = None
+    kb = None
+    try:
+        info_dict = get_video_formats(link, domain)
+        title = info_dict.get('title', 'No name')
+        thumb_url = info_dict.get('thumbnail')
+    except Exception:
+        pass
+
+    # Build deeplink token and PM button
+    bot_info = await query.bot.get_me()
+    bot_username = bot_info.username
+    token = 'dl_' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    try:
+        db.add_deeplink(token, link)
+    except Exception:
+        pass
+    deeplink = f"https://t.me/{bot_username}?start={token}"
+    pm_kb = AioInlineKeyboardMarkup(inline_keyboard=[[AioInlineKeyboardButton(text='Open bot to download', url=deeplink)]])
+
+    caption_text = title
+    # Prefer photo result with PM button when we have a thumbnail
+    if thumb_url:
+        result = InlineQueryResultPhoto(
+            id='parsed_photo',
+            photo_url=thumb_url,
+            thumbnail_url=thumb_url,
+            caption=caption_text,
+            reply_markup=pm_kb
+        )
+    else:
+        result = InlineQueryResultArticle(
+            id='parsed',
+            title=title,
+            description='Open bot to download',
+            input_message_content=InputTextMessageContent(message_text='Tap the button below to open the bot and choose quality.'),
+            reply_markup=pm_kb
+        )
+    await query.answer([result], cache_time=0, is_personal=True)
 
 async def check_subscription(call: CallbackQuery):
+    # Check subscription only in private chats; ignore in groups/supergroups
     try:
+        chat_type = getattr(call.message.chat, 'type', 'private') if call.message else 'private'
+        if chat_type in ("group", "supergroup"):
+            # In chats: do not check or spam, just tidy up
+            try:
+                if call.message:
+                    await call.message.delete()
+            except Exception:
+                pass
+            try:
+                await call.answer()
+            except Exception:
+                pass
+            return
+
+        # Private chat: enforce subscription
         user_id = call.from_user.id
         ch_id = config.channel_id
+        if not ch_id:
+            # No channel configured; allow usage
+            if call.message:
+                try:
+                    await call.message.delete()
+                except Exception:
+                    pass
+                await call.message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+            else:
+                await call.answer()
+            return
+
         member = await call.bot.get_chat_member(chat_id=ch_id, user_id=user_id)
-        status = member.status
+        status = getattr(member, 'status', None)
         if status in ["member", "administrator", "creator"]:
-            await call.message.delete()
-            await call.message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+            if call.message:
+                try:
+                    await call.message.delete()
+                except Exception:
+                    pass
+                await call.message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+            else:
+                await call.answer()
         else:
             await call.answer("Subscribe to the channel to use the bot", show_alert=True)
     except Exception as e:
-        await call.answer("Failed to check subscription. Please try again later.", show_alert=True)
+        # In chats: stay silent; in PM show generic alert
+        if call.message and getattr(call.message.chat, 'type', 'private') in ("group", "supergroup"):
+            try:
+                await call.answer()
+            except Exception:
+                pass
+        else:
+            try:
+                await call.answer("Failed to check subscription. Please try again later.", show_alert=True)
+            except Exception:
+                pass
         print(f"check_subscription error: {e}")
 
 async def main():
@@ -420,6 +631,8 @@ async def main():
     dp.pre_checkout_query.register(pre_checkout_handler)
     dp.message.register(on_successful_payment, F.successful_payment)
     dp.callback_query.register(check_subscription, F.data == "check_subscription")
+    # Inline mode handler
+    dp.inline_query.register(inline_query_handler)
     dp.message.register(all)
 
     print("Bot started")
