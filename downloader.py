@@ -11,6 +11,7 @@ from modules.database import DataBase
 import subprocess
 from PIL import Image
 import glob
+import requests
 
 db = DataBase()
 
@@ -333,10 +334,21 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
         base_name = os.path.splitext(os.path.basename(output_path))[0]
         safe_base = sanitize_filename(base_name)
         norm_thumb = ensure_jpg_thumb(thumb, output_path, safe_base)
-        if norm_thumb:
-            app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
-        else:
-            app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+        try:
+            if norm_thumb:
+                app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+            else:
+                app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+        except Exception:
+            try:
+                url = f"https://api.telegram.org/bot{config.bot_token}/sendVideo"
+                with open(output_path, 'rb') as fvid:
+                    requests.post(url, data={
+                        'chat_id': chat_id,
+                        'caption': title_orig
+                    }, files={'video': fvid})
+            except Exception:
+                pass
         app.stop()
         delete_pyrogram_session_files(session_base)
     except Exception as e:
