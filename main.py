@@ -30,17 +30,14 @@ with open("start.txt", "rt", encoding="utf-8") as start_file:
     start_file.close()
 
 async def welcome(message: Message, state: FSMContext):
-    # Handle deep-link start parameter: /start dl_<token>
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) > 1 and parts[1].startswith("dl_"):
-        token = parts[1]  # token stored with 'dl_' prefix, keep it intact
+        token = parts[1] 
         link = db.get_deeplink(token)
         if not link:
             await message.answer("Link is invalid or expired.")
             return
-        # Consume token
         db.delete_deeplink(token)
-        # Process link as if user sent it directly
         await process_link_message(message, state, link)
         return
     await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
@@ -55,7 +52,6 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             await call.answer("Wait while your video is downloading")
         return
 
-    # Parse callback data: youtube_download:format:size:note[:token]
     parts = call.data.split(":")
     _, format, size = parts[:3]
     note = parts[3] if len(parts) > 3 else None
@@ -63,7 +59,6 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
     if len(parts) > 4 and parts[-1].startswith("il_"):
         token = parts[-1]
 
-    # Load context either from FSM or from inline token
     if not data:
         context = None
         if token:
@@ -71,7 +66,6 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
                 raw = db.get_deeplink(token)
                 if raw:
                     context = json.loads(raw)
-                    # Consume token once used
                     try:
                         db.delete_deeplink(token)
                     except Exception:
@@ -84,7 +78,6 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         link = context.get('link')
         domain = context.get('domain')
         title = sanitize_filename(context.get('title') or 'Video')
-        # Make fresh paths for this download
         random_name = random.randint(10000, 99999)
         video_path = f"downloads/{random_name}.mp4"
         thumbnail_path = video_path.replace("mp4", "jpg")
@@ -128,13 +121,10 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             requires_payment = (format == "audio") or (note in ("720p", "1080p"))
             item_price = config.stars_price
 
-    # After a valid selection, remove the quality menu message to avoid clutter and double clicks
-    # Keep it only when we early-returned (e.g., too large) above.
     if call.message:
         try:
             await call.message.delete()
         except Exception:
-            # If we can't delete (e.g., already deleted or insufficient rights), ignore and continue
             pass
 
     if requires_payment:
@@ -178,10 +168,8 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         await call.message.answer("Download started")
     else:
         await call.answer("Download started. I'll send it to you in PM.")
-    # Determine target chat for delivery: inline callbacks don't have message/chat, fallback to user's PM
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
 
-    # Build session_id: prefer chat id when available; for inline fall back to inline_message_id to avoid user-id based sessions
     sess_id = None
     if call.message:
         sess_id = str(call.message.chat.id)
@@ -523,7 +511,6 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
     except Exception:
         pass
 
-    # Build deeplink token and PM button
     bot_info = await query.bot.get_me()
     bot_username = bot_info.username
     token = 'dl_' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
@@ -535,7 +522,6 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
     pm_kb = AioInlineKeyboardMarkup(inline_keyboard=[[AioInlineKeyboardButton(text='Open bot to download', url=deeplink)]])
 
     caption_text = title
-    # Prefer photo result with PM button when we have a thumbnail
     if thumb_url:
         result = InlineQueryResultPhoto(
             id='parsed_photo',
@@ -555,11 +541,9 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
     await query.answer([result], cache_time=0, is_personal=True)
 
 async def check_subscription(call: CallbackQuery):
-    # Check subscription only in private chats; ignore in groups/supergroups
     try:
         chat_type = getattr(call.message.chat, 'type', 'private') if call.message else 'private'
         if chat_type in ("group", "supergroup"):
-            # In chats: do not check or spam, just tidy up
             try:
                 if call.message:
                     await call.message.delete()
@@ -571,11 +555,9 @@ async def check_subscription(call: CallbackQuery):
                 pass
             return
 
-        # Private chat: enforce subscription
         user_id = call.from_user.id
         ch_id = config.channel_id
         if not ch_id:
-            # No channel configured; allow usage
             if call.message:
                 try:
                     await call.message.delete()
@@ -600,7 +582,6 @@ async def check_subscription(call: CallbackQuery):
         else:
             await call.answer("Subscribe to the channel to use the bot", show_alert=True)
     except Exception as e:
-        # In chats: stay silent; in PM show generic alert
         if call.message and getattr(call.message.chat, 'type', 'private') in ("group", "supergroup"):
             try:
                 await call.answer()
@@ -631,7 +612,6 @@ async def main():
     dp.pre_checkout_query.register(pre_checkout_handler)
     dp.message.register(on_successful_payment, F.successful_payment)
     dp.callback_query.register(check_subscription, F.data == "check_subscription")
-    # Inline mode handler
     dp.inline_query.register(inline_query_handler)
     dp.message.register(all)
 

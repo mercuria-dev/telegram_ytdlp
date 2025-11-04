@@ -377,5 +377,4 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
     delete_file(output_path)
 
 def delete_pyrogram_session_files(session_base: str):
-    # Intentionally disabled: keep Pyrogram sessions persistent per chat_id as requested
     return
