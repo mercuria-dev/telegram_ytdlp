@@ -378,7 +378,8 @@ async def on_successful_payment(message: Message, state: FSMContext):
         thumbnail_path = purchase['thumbnail_path']
         title = sanitize_filename(purchase['title'])
         fmt = purchase['format']
-        purchase_payload = data.get('purchase_payload')
+        # Use payload from Telegram payment as the source of truth; fallback to state if needed
+        purchase_payload = payload or data.get('purchase_payload')
 
         db.set_work(message.from_user.id, 1)
         await message.answer("Payment received ✅\nStarting download…")
