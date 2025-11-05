@@ -396,7 +396,14 @@ async def on_successful_payment(message: Message, state: FSMContext):
         await state.update_data(purchase_payload=None)
     except Exception as e:
         print(f"Successful payment handling error: {e}")
-        await message.answer("Payment processing error. Please try again.")
+        try:
+            kb = None
+            if payload:
+                pay_price = config.stars_premium_price if (":prem" in str(payload)) else config.stars_price
+                kb = AioInlineKeyboardMarkup(inline_keyboard=[[AioInlineKeyboardButton(text=f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payload}")]])
+            await message.answer("Payment processing error. You can request a refund.", reply_markup=kb)
+        except Exception:
+            await message.answer("Payment processing error. Please try again.")
 
 
 async def refund_star_payment(bot_token: str, user_id: int, charge_id: str) -> bool:
