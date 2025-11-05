@@ -2,7 +2,7 @@ import asyncio
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, InlineQuery
-from aiogram.types import InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultPhoto
+from aiogram.types import InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultPhoto, FSInputFile
 from aiogram.types import InlineKeyboardMarkup as AioInlineKeyboardMarkup, InlineKeyboardButton as AioInlineKeyboardButton
 from aiogram.types import PreCheckoutQuery, LabeledPrice
 import aiohttp
@@ -18,11 +18,33 @@ from modules.middleware.throttling import ThrottlingMiddleware
 from aiogram.fsm.context import FSMContext
 from downloader import *
 import threading
+import traceback
 import requests
 import random
 import config
 import string
 import json
+import os
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+def looks_like_image_url(url: str | None) -> bool:
+    if not url or not isinstance(url, str):
+        return False
+    u = url.lower().split("?", 1)[0]
+    return any(u.endswith(ext) for ext in IMAGE_EXTS)
+
+def is_supported_domain(domain: str | None) -> bool:
+    if not domain:
+        return False
+    d = domain.lower()
+    if ("youtu" in d) or ("soundcloud.com" in d):
+        return True
+    if ("tiktok" in d) or ("instagram" in d) or ("pinterest" in d):
+        return True
+    if (d == "vk.com") or ("vkvideo.ru" in d):
+        return True
+    return False
 
 db = DataBase()
 with open("start.txt", "rt", encoding="utf-8") as start_file:
@@ -83,10 +105,11 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         thumbnail_path = video_path.replace("mp4", "jpg")
         thumb_url = context.get('thumbnail_url')
         try:
-            if thumb_url:
-                response = requests.get(thumb_url)
-                with open(thumbnail_path, 'wb') as file:
-                    file.write(response.content)
+            if looks_like_image_url(thumb_url):
+                response = requests.get(thumb_url, timeout=10)
+                if response.ok and response.content:
+                    with open(thumbnail_path, 'wb') as file:
+                        file.write(response.content)
         except Exception:
             pass
         try:
@@ -240,11 +263,24 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     await message.answer("Live streams are restricted!")
                     return
 
-                thumbnail_url = info_dict.get('thumbnail', None)
+                thumbnail_url = info_dict.get('thumbnail')
+                if not looks_like_image_url(thumbnail_url):
+                    for th in (info_dict.get('thumbnails') or []):
+                        u = th.get('url') if isinstance(th, dict) else None
+                        if looks_like_image_url(u):
+                            thumbnail_url = u
+                            break
+                thumb_saved = False
                 thumbnail_path = video_path.replace("mp4", "jpg")
-                response = requests.get(thumbnail_url)
-                with open(thumbnail_path, 'wb') as file:
-                    file.write(response.content)
+                if looks_like_image_url(thumbnail_url):
+                    try:
+                        resp = requests.get(thumbnail_url, timeout=10)
+                        if resp.ok and resp.content:
+                            with open(thumbnail_path, 'wb') as file:
+                                file.write(resp.content)
+                            thumb_saved = True
+                    except Exception:
+                        thumb_saved = False
                 title = info_dict.get('title', 'No name')
                 await state.update_data(link=link)
                 await state.update_data(title=title)
@@ -266,10 +302,13 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 caption_text = title
                 if premium_mode:
                     caption_text += f"\n\nNote: This video is age-restricted (18+) or has limited access on YouTube and is only accessible with cookies. All download options require {config.stars_premium_price} ⭐."
-                if not thumbnail_url:
-                    await message.answer(caption_text, reply_markup=kb)
+                if thumb_saved and os.path.exists(thumbnail_path):
+                    try:
+                        await message.answer_photo(FSInputFile(thumbnail_path), caption_text, reply_markup=kb)
+                    except Exception:
+                        await message.answer(caption_text, reply_markup=kb)
                 else:
-                    await message.answer_photo(thumbnail_url, caption_text, reply_markup=kb)
+                    await message.answer(caption_text, reply_markup=kb)
             else:
                 if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1:
                     db.set_work(message.from_user.id, 1)
@@ -281,6 +320,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
         else:
             await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
     except:
+        print(traceback.format_exc())
         await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
 
 async def all(message: Message, state: FSMContext):
@@ -295,6 +335,13 @@ async def all(message: Message, state: FSMContext):
                 return
             await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
             return
+        domain = get_domain(link)
+        if not is_supported_domain(domain):
+            if chat_type in ("group", "supergroup"):
+                return
+            else:
+                await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+                return
         await process_link_message(message, state, link)
     except:
         if getattr(message.chat, 'type', 'private') not in ("group", "supergroup"):
@@ -508,6 +555,12 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
         info_dict = get_video_formats(link, domain)
         title = info_dict.get('title', 'No name')
         thumb_url = info_dict.get('thumbnail')
+        if not looks_like_image_url(thumb_url):
+            for th in (info_dict.get('thumbnails') or []):
+                u = th.get('url') if isinstance(th, dict) else None
+                if looks_like_image_url(u):
+                    thumb_url = u
+                    break
     except Exception:
         pass
 
@@ -522,7 +575,7 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
     pm_kb = AioInlineKeyboardMarkup(inline_keyboard=[[AioInlineKeyboardButton(text='Open bot to download', url=deeplink)]])
 
     caption_text = title
-    if thumb_url:
+    if thumb_url and looks_like_image_url(thumb_url):
         result = InlineQueryResultPhoto(
             id='parsed_photo',
             photo_url=thumb_url,

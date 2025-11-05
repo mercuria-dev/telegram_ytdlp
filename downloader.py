@@ -10,8 +10,6 @@ import time
 from modules.database import DataBase
 import subprocess
 from PIL import Image
-import glob
-import requests
 
 db = DataBase()
 
@@ -64,10 +62,17 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
             'outtmpl': outtmpl,
             'writethumbnail': True,
             'keepvideo': False,
+            'cookiefile': 'cookies/youtube.txt',
+            'noprogress': True,
+            'quiet': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios', 'web']
+                }
+            }
         }
-        ydl_opts['cookiefile'] = 'cookies/youtube.txt'
 
-        max_retries = 10
+        max_retries = 3
         last_exc = None
         for attempt in range(1, max_retries + 1):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -77,7 +82,7 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                     break
                 except yt_dlp.utils.DownloadError as de:
                     last_exc = de
-                    time.sleep(4)
+                    time.sleep(min(2 * attempt, 6))
                     continue
 
         if last_exc is not None:
@@ -129,16 +134,15 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
         produced_mp3 = outtmpl + '.mp3'
         try:
             app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
-        except:
-            try:
-                app.send_audio(chat_id=chat_id, audio=output_path, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
-            except Exception as e:
-                print(f"Failed to send audio: {e}")
+        except Exception as e:
+            print(f"Failed to send audio: {e}")
         app.stop()
         delete_pyrogram_session_files(session_base)
-        if audio_thumb:
-            delete_file(audio_thumb)
-        delete_file(produced_mp3)
+        if audio_thumb and os.path.exists(audio_thumb) and (audio_thumb != produced_mp3):
+            try:
+                delete_file(audio_thumb)
+            except Exception:
+                pass
     except Exception as e:
         try:
             session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
@@ -156,7 +160,10 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
         except Exception:
             pass
     db.set_work(user_id_for_work or chat_id, 0)
-    delete_file(output_path)
+    try:
+        delete_file(output_path)
+    except Exception:
+        pass
 
 def get_video_formats(url, domain):
     ydl_opts = {
@@ -257,7 +264,12 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        ydl_opts = {'format': 'best', 'outtmpl': output_path}
+        ydl_opts = {
+            'format': 'best',
+            'outtmpl': output_path,
+            'noprogress': True,
+            'quiet': True
+        }
         if domain == "instagram.com":
             ydl_opts['cookiefile'] = 'cookies/insta.txt'
             ydl_opts['quiet'] = True
@@ -278,9 +290,13 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             else:
                 ydl_opts['format'] = f"{video_format}+bestaudio/best"
                 ydl_opts['merge_output_format'] = "mp4"
-
-        ydl_opts['cookiefile'] = 'cookies/youtube.txt'
-        max_retries = 10
+            ydl_opts['cookiefile'] = 'cookies/youtube.txt'
+            ydl_opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['android', 'ios', 'web']
+                }
+            }
+        max_retries = 3
         last_exc = None
         for attempt in range(1, max_retries + 1):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -290,7 +306,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     break
                 except yt_dlp.utils.DownloadError as de:
                     last_exc = de
-                    time.sleep(4)
+                    time.sleep(min(2 * attempt, 6))
                     continue
 
         if last_exc is not None:
@@ -315,7 +331,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             return
 
         try:
-            with yt_dlp.YoutubeDL({'cookiefile': 'cookies/youtube.txt'}) as ydl_info:
+            with yt_dlp.YoutubeDL({'cookiefile': 'cookies/youtube.txt', 'quiet': True}) as ydl_info:
                 info_dict = ydl_info.extract_info(url, download=False)
         except Exception:
             info_dict = {}
@@ -339,16 +355,8 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                 app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
             else:
                 app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
-        except Exception:
-            try:
-                url = f"https://api.telegram.org/bot{config.bot_token}/sendVideo"
-                with open(output_path, 'rb') as fvid:
-                    requests.post(url, data={
-                        'chat_id': chat_id,
-                        'caption': title_orig
-                    }, files={'video': fvid})
-            except Exception:
-                pass
+        except Exception as e:
+            print(f"Failed to send video: {e}")
         app.stop()
         delete_pyrogram_session_files(session_base)
     except Exception as e:
