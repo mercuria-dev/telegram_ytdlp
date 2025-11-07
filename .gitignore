@@ -163,3 +163,8 @@ cython_debug/
 #.idea/
 launch.json
 .vscode
+
+# Runtime artifacts (ignored again)
+downloads/
+base/db.db
+base/*.db

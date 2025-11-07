@@ -10,8 +10,33 @@ import time
 from modules.database import DataBase
 import subprocess
 from PIL import Image
+import json
+import requests
 
 db = DataBase()
+
+def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | None = None) -> bool:
+    try:
+        url = f"https://api.telegram.org/bot{config.bot_token}/sendMessage"
+        data = {
+            'chat_id': str(chat_id),
+            'text': text,
+            'disable_web_page_preview': 'true'
+        }
+        if payment_payload:
+            # Build inline keyboard with refund button
+            pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
+            kb = {
+                "inline_keyboard": [[{"text": f"🔄 Refund {pay_price}⭐", "callback_data": f"refund:{payment_payload}"}]]
+            }
+            data['reply_markup'] = json.dumps(kb)
+        resp = requests.post(url, data=data, timeout=30)
+        if resp.status_code != 200:
+            return False
+        j = resp.json()
+        return bool(j.get('ok'))
+    except Exception:
+        return False
 
 def clear_downloads():
     fs = os.listdir('downloads')
@@ -86,22 +111,25 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                     continue
 
         if last_exc is not None:
-            try:
-                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
-                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-                app.start()
-                msg = str(last_exc)
-                kb = None
-                if payment_payload:
-                    pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
-                    kb = InlineKeyboardMarkup(
-                        [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
-                    )
-                app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
-                app.stop()
-                delete_pyrogram_session_files(session_base)
-            except Exception:
-                pass
+            # Prefer Bot API notification so we don't hit Pyrogram peer issues
+            msg = str(last_exc)
+            sent = bot_api_send_message(chat_id, f"Download failed after {max_retries} attempts: {msg}", payment_payload)
+            if not sent:
+                try:
+                    session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                    app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                    app.start()
+                    kb = None
+                    if payment_payload:
+                        pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
+                        kb = InlineKeyboardMarkup(
+                            [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                        )
+                    app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
+                    app.stop()
+                    delete_pyrogram_session_files(session_base)
+                except Exception:
+                    pass
             db.set_work(user_id_for_work or chat_id, 0)
             delete_file(output_path)
             return
@@ -128,16 +156,72 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                 except Exception:
                     audio_thumb = thumb
 
-        session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
-        app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-        app.start()
         produced_mp3 = outtmpl + '.mp3'
+        # Try Bot API upload for files <= 50MB, else fallback to Pyrogram
         try:
-            app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
-        except Exception as e:
-            print(f"Failed to send audio: {e}")
-        app.stop()
-        delete_pyrogram_session_files(session_base)
+            size_bytes = os.path.getsize(produced_mp3)
+        except Exception:
+            size_bytes = 0
+
+        if size_bytes and size_bytes <= 50 * 1024 * 1024:
+            try:
+                url = f"https://api.telegram.org/bot{config.bot_token}/sendAudio"
+                data = {
+                    'chat_id': str(chat_id),
+                    'caption': f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>",
+                    'parse_mode': 'HTML',
+                    'title': safe_base,
+                }
+                with open(produced_mp3, 'rb') as af:
+                    files = {
+                        'audio': (os.path.basename(produced_mp3), af)
+                    }
+                    if audio_thumb and os.path.exists(audio_thumb):
+                        with open(audio_thumb, 'rb') as tf:
+                            files['thumbnail'] = (os.path.basename(audio_thumb), tf)
+                            resp = requests.post(url, data=data, files=files, timeout=120)
+                    else:
+                        resp = requests.post(url, data=data, files=files, timeout=120)
+                if resp.status_code != 200 or not resp.json().get('ok', False):
+                    raise RuntimeError(f"Bot API sendAudio failed: HTTP {resp.status_code} {resp.text[:200]}")
+            except Exception as e:
+                # Fallback to Pyrogram if Bot API fails
+                try:
+                    session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                    app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                    app.start()
+                    app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+                    app.stop()
+                    delete_pyrogram_session_files(session_base)
+                except Exception as e2:
+                    print(f"Failed to send audio (both Bot API and Pyrogram): {e} | {e2}")
+                    # Inform user and offer refund
+                    bot_api_send_message(chat_id, f"Send failed: {e2}", payment_payload)
+                    db.set_work(user_id_for_work or chat_id, 0)
+                    try:
+                        delete_file(output_path)
+                    except Exception:
+                        pass
+                    return
+        else:
+            session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+            app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+            app.start()
+            try:
+                app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+            except Exception as e:
+                print(f"Failed to send audio: {e}")
+                bot_api_send_message(chat_id, f"Send failed: {e}", payment_payload)
+                app.stop()
+                delete_pyrogram_session_files(session_base)
+                db.set_work(user_id_for_work or chat_id, 0)
+                try:
+                    delete_file(output_path)
+                except Exception:
+                    pass
+                return
+            app.stop()
+            delete_pyrogram_session_files(session_base)
         if audio_thumb and os.path.exists(audio_thumb) and (audio_thumb != produced_mp3):
             try:
                 delete_file(audio_thumb)
@@ -310,22 +394,24 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     continue
 
         if last_exc is not None:
-            try:
-                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
-                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-                app.start()
-                msg = str(last_exc)
-                kb = None
-                if payment_payload:
-                    pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
-                    kb = InlineKeyboardMarkup(
-                        [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
-                    )
-                app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
-                app.stop()
-                delete_pyrogram_session_files(session_base)
-            except Exception:
-                pass
+            msg = str(last_exc)
+            sent = bot_api_send_message(chat_id, f"Download failed after {max_retries} attempts: {msg}", payment_payload)
+            if not sent:
+                try:
+                    session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                    app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                    app.start()
+                    kb = None
+                    if payment_payload:
+                        pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
+                        kb = InlineKeyboardMarkup(
+                            [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
+                        )
+                    app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
+                    app.stop()
+                    delete_pyrogram_session_files(session_base)
+                except Exception:
+                    pass
             db.set_work(user_id_for_work or chat_id, 0)
             delete_file(output_path)
             return
@@ -344,21 +430,79 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                 width = f.get('width', 0) or 0
                 height = f.get('height', 0) or 0
 
-        session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
-        app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-        app.start()
         base_name = os.path.splitext(os.path.basename(output_path))[0]
         safe_base = sanitize_filename(base_name)
         norm_thumb = ensure_jpg_thumb(thumb, output_path, safe_base)
+
+        # Try Bot API upload for files <= 50MB, else fallback to Pyrogram
         try:
-            if norm_thumb:
-                app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
-            else:
-                app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
-        except Exception as e:
-            print(f"Failed to send video: {e}")
-        app.stop()
-        delete_pyrogram_session_files(session_base)
+            size_bytes = os.path.getsize(output_path)
+        except Exception:
+            size_bytes = 0
+
+        if size_bytes and size_bytes <= 50 * 1024 * 1024:
+            try:
+                url = f"https://api.telegram.org/bot{config.bot_token}/sendVideo"
+                data = {
+                    'chat_id': str(chat_id),
+                    'caption': title_orig or safe_base,
+                    'supports_streaming': 'true',
+                }
+                with open(output_path, 'rb') as vf:
+                    files = {
+                        'video': (os.path.basename(output_path), vf)
+                    }
+                    if norm_thumb and os.path.exists(norm_thumb):
+                        with open(norm_thumb, 'rb') as tf:
+                            files['thumbnail'] = (os.path.basename(norm_thumb), tf)
+                            resp = requests.post(url, data=data, files=files, timeout=120)
+                    else:
+                        resp = requests.post(url, data=data, files=files, timeout=120)
+                if resp.status_code != 200 or not resp.json().get('ok', False):
+                    raise RuntimeError(f"Bot API sendVideo failed: HTTP {resp.status_code} {resp.text[:200]}")
+            except Exception as e:
+                # Fallback to Pyrogram if Bot API fails
+                try:
+                    session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                    app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                    app.start()
+                    if norm_thumb and os.path.exists(norm_thumb):
+                        app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+                    else:
+                        app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+                    app.stop()
+                    delete_pyrogram_session_files(session_base)
+                except Exception as e2:
+                    print(f"Failed to send video (both Bot API and Pyrogram): {e} | {e2}")
+                    bot_api_send_message(chat_id, f"Send failed: {e2}", payment_payload)
+                    db.set_work(user_id_for_work or chat_id, 0)
+                    try:
+                        delete_file(output_path)
+                    except Exception:
+                        pass
+                    return
+        else:
+            session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+            app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+            app.start()
+            try:
+                if norm_thumb and os.path.exists(norm_thumb):
+                    app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+                else:
+                    app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+            except Exception as e:
+                print(f"Failed to send video: {e}")
+                bot_api_send_message(chat_id, f"Send failed: {e}", payment_payload)
+                app.stop()
+                delete_pyrogram_session_files(session_base)
+                db.set_work(user_id_for_work or chat_id, 0)
+                try:
+                    delete_file(output_path)
+                except Exception:
+                    pass
+                return
+            app.stop()
+            delete_pyrogram_session_files(session_base)
     except Exception as e:
         try:
             if domain in ["instagram.com", "twitter.com", "x.com"]:
@@ -371,28 +515,26 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     url
                 ]
                 subprocess.run(command)
-                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
-                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-                app.start()
-                app.send_photo(chat_id=chat_id, photo=output_path)
-                app.stop()
-                delete_pyrogram_session_files(session_base)
+                # Try Bot API sendPhoto first
+                try:
+                    api = f"https://api.telegram.org/bot{config.bot_token}/sendPhoto"
+                    with open(output_path, 'rb') as pf:
+                        files = {'photo': (os.path.basename(output_path), pf)}
+                        data = {'chat_id': str(chat_id)}
+                        r = requests.post(api, data=data, files=files, timeout=120)
+                        ok = (r.status_code == 200 and r.json().get('ok'))
+                    if not ok:
+                        raise RuntimeError(r.text[:200])
+                except Exception:
+                    session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                    app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                    app.start()
+                    app.send_photo(chat_id=chat_id, photo=output_path)
+                    app.stop()
+                    delete_pyrogram_session_files(session_base)
         except Exception:
-            try:
-                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
-                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-                app.start()
-                kb = None
-                if payment_payload:
-                    pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
-                    kb = InlineKeyboardMarkup(
-                        [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
-                    )
-                app.send_message(chat_id=chat_id, text=f"Download error: {e}", reply_markup=kb)
-                app.stop()
-                delete_pyrogram_session_files(session_base)
-            except Exception:
-                pass
+            # Prefer Bot API error notification
+            bot_api_send_message(chat_id, f"Download error: {e}", payment_payload)
     db.set_work(user_id_for_work or chat_id, 0)
     delete_file(output_path)
 
