@@ -46,6 +46,27 @@ def is_supported_domain(domain: str | None) -> bool:
         return True
     return False
 
+def is_youtube_playlist_like(url: str) -> bool:
+    """Detect YouTube watch/mix/playlist style links we should ignore.
+    We ignore if there's a 'list=' param (playlist or mix) to avoid parsing huge playlist.
+    """
+    try:
+        if 'youtu' not in url:
+            return False
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(url)
+        if u.netloc not in {"www.youtube.com", "youtube.com", "m.youtube.com", "music.youtube.com"}:
+            return False
+        if u.path not in ("/watch", "/playlist"):
+            return False
+        qs = parse_qs(u.query or '')
+        if 'list' in qs:
+            # list param present -> treat as playlist/mix
+            return True
+        return False
+    except Exception:
+        return False
+
 db = DataBase()
 with open("start.txt", "rt", encoding="utf-8") as start_file:
     start_msg = start_file.read()
@@ -218,6 +239,10 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
     try:
         domain = get_domain(link)
         if domain:
+            # Ignore YouTube playlist/mix links with list= to prevent heavy playlist parsing
+            if domain and 'youtu' in domain and is_youtube_playlist_like(link):
+                await message.answer("Please send a direct video link without the list= parameter (playlists are ignored).")
+                return
             if domain == "vk.com":
                 if link.find("@") > -1:
                     return
@@ -342,6 +367,12 @@ async def all(message: Message, state: FSMContext):
             else:
                 await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
                 return
+        if domain and 'youtu' in domain and is_youtube_playlist_like(link):
+            # Ignore playlist/mix; in private chat inform user, in groups stay silent
+            if chat_type in ("group", "supergroup"):
+                return
+            await message.answer("YouTube playlist/mix links are ignored. Please send a direct link like https://youtube.com/watch?v=ID without list=.")
+            return
         await process_link_message(message, state, link)
     except:
         if getattr(message.chat, 'type', 'private') not in ("group", "supergroup"):
