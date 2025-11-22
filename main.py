@@ -336,16 +336,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                         await message.answer(caption_text, reply_markup=kb)
                 except Exception:
                     await message.answer(caption_text, reply_markup=kb)
-                # Show yt-dlp logs (warnings/errors) to the user to explain format probing
-                try:
-                    if ytlog and ytlog.strip():
-                        # keep message short: send as a code block with limited size
-                        log_text = ytlog.strip()
-                        if len(log_text) > 1900:
-                            log_text = log_text[-1900:]
-                        await message.answer(f"<code>{log_text}</code>", parse_mode=ParseMode.HTML)
-                except Exception:
-                    pass
+                # yt-dlp logs are printed to server console only (not sent to Telegram)
             else:
                 if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1:
                     db.set_work(message.from_user.id, 1)
