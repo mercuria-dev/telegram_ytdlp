@@ -1,6 +1,6 @@
 # YtDlp Telegram Bot
 
-![Баннер](https://i.ibb.co/nwnrB9H/icon.png)
+![Баннер](https://i.ibb.co/v6P52tB7/icon.png)
 
 # 📖 Description
 This bot can download:
@@ -10,7 +10,7 @@ This bot can download:
 
 # ⚙️ Project Setup Guide
 
-Welcome to the project setup guide! Follow these steps to configure and run the project, whether you're using Python or Docker.
+Welcome to the project setup guide! Follow these steps to configure and run the project using Python.
 
 ## Getting Started
 
@@ -48,30 +48,25 @@ ADMIN_LIST=123, 456(where are 123 and 456 - telegram ids of admins)
 
 ## Setup Instructions
 
-1. **Install Docker**
+1. **Install dependencies**
 
-   Follow the instructions on [Docker's official installation guide](https://docs.docker.com/engine/install/).
+   Install the required Python packages from `requirements.txt`:
 
-2. **Run Docker Setup Menu**
-
-   Execute the following command to start the Docker setup menu:
-
-   ```bash
-   sh run.sh
+   ```cmd
+   pip install -r requirements.txt
    ```
 
-   Using Docker, you can:
-   - Build the project
-   - Create and start a container
-   - Stop the container
-   - Restart the container
-   - Remove the container
-   - Show container logs
+2. **Run the bot**
+
+   Start the bot with Python:
+
+   ```cmd
+   python main.py
+   ```
 
 ## Notes
 
 - Ensure that your `.env` file is properly configured with the correct values.
-- Follow Docker's documentation for any additional configuration or troubleshooting.
 
 # 🚀 Usage
 
