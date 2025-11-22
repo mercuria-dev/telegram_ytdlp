@@ -166,5 +166,6 @@ launch.json
 
 # Runtime artifacts (ignored again)
 downloads/
+dlp/
 base/db.db
 base/*.db

@@ -25,6 +25,7 @@ import config
 import string
 import json
 import os
+from modules import dlp_manager
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -257,7 +258,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 return
             random_name = random.randint(10000, 99999)
             video_path = f"downloads/{random_name}.mp4"
-            info_dict = get_video_formats(link, domain)
+            info_dict, ytlog = get_video_formats(link, domain)
             live = info_dict.get('is_live', False)
             if live:
                 await message.answer("Live streams are restricted!")
@@ -327,13 +328,24 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 caption_text = title
                 if premium_mode:
                     caption_text += f"\n\nNote: This video is age-restricted (18+) or has limited access on YouTube and is only accessible with cookies. All download options require {config.stars_premium_price} ⭐."
-                if thumb_saved and os.path.exists(thumbnail_path):
-                    try:
+                # Send formats keyboard and also show yt-dlp stderr logs (if any)
+                try:
+                    if thumb_saved and os.path.exists(thumbnail_path):
                         await message.answer_photo(FSInputFile(thumbnail_path), caption_text, reply_markup=kb)
-                    except Exception:
+                    else:
                         await message.answer(caption_text, reply_markup=kb)
-                else:
+                except Exception:
                     await message.answer(caption_text, reply_markup=kb)
+                # Show yt-dlp logs (warnings/errors) to the user to explain format probing
+                try:
+                    if ytlog and ytlog.strip():
+                        # keep message short: send as a code block with limited size
+                        log_text = ytlog.strip()
+                        if len(log_text) > 1900:
+                            log_text = log_text[-1900:]
+                        await message.answer(f"<code>{log_text}</code>", parse_mode=ParseMode.HTML)
+                except Exception:
+                    pass
             else:
                 if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1:
                     db.set_work(message.from_user.id, 1)
@@ -591,7 +603,7 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
     thumb_url = None
     kb = None
     try:
-        info_dict = get_video_formats(link, domain)
+        info_dict, ytlog = get_video_formats(link, domain)
         title = info_dict.get('title', 'No name')
         thumb_url = info_dict.get('thumbnail')
         if not looks_like_image_url(thumb_url):
@@ -601,6 +613,7 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
                     thumb_url = u
                     break
     except Exception:
+        ytlog = ''
         pass
 
     bot_info = await query.bot.get_me()
@@ -689,6 +702,11 @@ async def check_subscription(call: CallbackQuery):
 async def main():
     db.reset_work()
     clear_downloads()
+    # Ensure dlp folder has the two latest yt-dlp releases before bot starts
+    try:
+        dlp_manager.download_latest_releases(2)
+    except Exception as e:
+        print(f"dlp_manager error: {e}")
     bot_properties = DefaultBotProperties(parse_mode=ParseMode.HTML)
     bot = Bot(token=bot_token, default=bot_properties)
     dp = Dispatcher(storage=MemoryStorage())

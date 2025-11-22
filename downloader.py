@@ -1,19 +1,51 @@
 
-import yt_dlp
+import os
+import subprocess
 from pyrogram import Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import config
-import os
 import asyncio
 import re
 import time
 from modules.database import DataBase
-import subprocess
+from modules import dlp_manager
+import shlex
 from PIL import Image
 import json
 import requests
 
 db = DataBase()
+
+
+def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: bool = False):
+    # Prefer selected executable from dlp_manager (dlp/ folder). Falls back to system `yt-dlp`.
+    exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
+    cmd = [exe] + args_list
+    if capture_output:
+        # Always capture output when caller needs to parse it
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or f"yt-dlp exited {proc.returncode}")
+        if return_stderr:
+            return proc.stdout, proc.stderr
+        return proc.stdout
+    # When not capturing, always stream output to the console so operator sees progress/logs
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"yt-dlp exited with code {proc.returncode}")
+    return None
+
+
+def get_info_json(url, cookiefile=None):
+    args = ["--dump-single-json", "--no-warnings", "--no-progress", url]
+    if cookiefile:
+        args = ["--cookies", cookiefile] + args
+    out = run_yt_dlp_process(args, capture_output=True)
+    try:
+        return json.loads(out)
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse yt-dlp JSON output: {e}\nOutput:\n{out}")
+
 
 def select_cookiefile(url_or_domain: str | None) -> str | None:
     try:
@@ -104,39 +136,39 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
 
         ydl_opts = {
             'format': 'bestaudio/best',
-            'postprocessors': [
-                {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '128'},
-                {'key': 'FFmpegMetadata'},
-                {'key': 'EmbedThumbnail'}
-            ],
             'outtmpl': outtmpl,
             'writethumbnail': True,
-            'keepvideo': False,
             'noprogress': True,
             'quiet': True,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'ios', 'web']
-                }
-            }
         }
 
         ck = select_cookiefile(video_url)
-        if ck:
-            ydl_opts['cookiefile'] = ck
 
         max_retries = 3
         last_exc = None
+        # Build base args
+        args = []
+        if ydl_opts.get('format'):
+            args += ['-f', ydl_opts['format']]
+        if ydl_opts.get('outtmpl'):
+            args += ['-o', ydl_opts['outtmpl']]
+        if ydl_opts.get('writethumbnail'):
+            args += ['--write-thumbnail']
+        # extract audio to mp3, embed thumbnail, add metadata
+        args += ['--extract-audio', '--audio-format', 'mp3', '--audio-quality', '128', '--embed-thumbnail', '--add-metadata']
+        # Always show progress/logs for yt-dlp (do not add quiet/no-progress)
+        if ck:
+            args = ['--cookies', ck] + args
+
         for attempt in range(1, max_retries + 1):
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    ydl.download([video_url])
-                    last_exc = None
-                    break
-                except yt_dlp.utils.DownloadError as de:
-                    last_exc = de
-                    time.sleep(min(2 * attempt, 6))
-                    continue
+            try:
+                run_yt_dlp_process(args + [video_url])
+                last_exc = None
+                break
+            except Exception as de:
+                last_exc = de
+                time.sleep(min(2 * attempt, 6))
+                continue
 
         if last_exc is not None:
             # Prefer Bot API notification so we don't hit Pyrogram peer issues
@@ -278,25 +310,56 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
         pass
 
 def get_video_formats(url, domain):
-    ydl_opts = {
-        'listformats': True,
-    }
     ck = select_cookiefile(url or domain)
-    if ck:
-        ydl_opts['cookiefile'] = ck
+    try:
+        # capture stderr/logs as well so caller can display them
+        args = ["--dump-single-json", "--no-warnings", "--no-progress", url]
+        if ck:
+            args = ["--cookies", ck] + args
+        out, err = run_yt_dlp_process(args, capture_output=True, return_stderr=True)
+        try:
+            info = json.loads(out)
+        except Exception:
+            info = {}
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = ydl.extract_info(url, download=False)
-        return info_dict
+        # Always run a streaming `--list-formats` so formats appear in console in real time.
+        try:
+            lf_args = ["--list-formats", url]
+            if ck:
+                lf_args = ["--cookies", ck] + lf_args
+            try:
+                exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
+                cmd = [exe] + lf_args
+                # Stream combined stdout/stderr line-by-line to console and collect it
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                list_out_lines = []
+                if proc.stdout is not None:
+                    for line in proc.stdout:
+                        try:
+                            print(line.rstrip())
+                        except Exception:
+                            pass
+                        try:
+                            list_out_lines.append(line.rstrip())
+                        except Exception:
+                            pass
+                proc.wait()
+                if list_out_lines:
+                    err = (err or '') + '\n' + '\n'.join(list_out_lines)
+            except Exception:
+                # ignore streaming errors
+                pass
+        except Exception:
+            pass
+
+        return info, (err or '')
+    except Exception:
+        return {}, ''
 
 def is_youtube_public(url: str) -> bool:
     try:
-        opts = {'listformats': True}
         ck = select_cookiefile(url)
-        if ck:
-            opts['cookiefile'] = ck
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        info = get_info_json(url, ck)
     except Exception:
         return False
     fmts = info.get('formats', []) if isinstance(info, dict) else []
@@ -390,12 +453,11 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             ydl_opts['quiet'] = True
         elif domain.startswith("youtu"):
             try:
-                probe_opts = {}
                 ck = select_cookiefile(url)
-                if ck:
-                    probe_opts['cookiefile'] = ck
-                with yt_dlp.YoutubeDL(probe_opts) as probe:
-                    info = probe.extract_info(url, download=False)
+                try:
+                    info = get_info_json(url, ck)
+                except Exception:
+                    info = {}
             except Exception:
                 info = {}
             fmts = info.get('formats', []) if isinstance(info, dict) else []
@@ -414,18 +476,29 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     'player_client': ['android', 'ios', 'web']
                 }
             }
+        # Build args for yt-dlp CLI
+        args = []
+        if ydl_opts.get('format'):
+            args += ['-f', ydl_opts['format']]
+        if ydl_opts.get('outtmpl'):
+            args += ['-o', ydl_opts['outtmpl']]
+        # Always show progress/logs for yt-dlp (do not add quiet/no-progress)
+        if ydl_opts.get('merge_output_format'):
+            args += ['--merge-output-format', ydl_opts['merge_output_format']]
+        if ck_all:
+            args = ['--cookies', ck_all] + args
+
         max_retries = 3
         last_exc = None
         for attempt in range(1, max_retries + 1):
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    ydl.download([url])
-                    last_exc = None
-                    break
-                except yt_dlp.utils.DownloadError as de:
-                    last_exc = de
-                    time.sleep(min(2 * attempt, 6))
-                    continue
+            try:
+                run_yt_dlp_process(args + [url])
+                last_exc = None
+                break
+            except Exception as de:
+                last_exc = de
+                time.sleep(min(2 * attempt, 6))
+                continue
 
         if last_exc is not None:
             msg = str(last_exc)
@@ -451,12 +524,11 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             return
 
         try:
-            info_opts = {'quiet': True}
             ck = select_cookiefile(url)
-            if ck:
-                info_opts['cookiefile'] = ck
-            with yt_dlp.YoutubeDL(info_opts) as ydl_info:
-                info_dict = ydl_info.extract_info(url, download=False)
+            try:
+                info_dict = get_info_json(url, ck)
+            except Exception:
+                info_dict = {}
         except Exception:
             info_dict = {}
 
