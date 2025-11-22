@@ -15,6 +15,31 @@ import requests
 
 db = DataBase()
 
+def select_cookiefile(url_or_domain: str | None) -> str | None:
+    try:
+        d = None
+        if not url_or_domain:
+            d = None
+        else:
+            # If it's a URL, resolve domain; else assume it's a domain string
+            if re.match(r'^https?://', str(url_or_domain), re.IGNORECASE):
+                d = get_domain(str(url_or_domain))
+            else:
+                d = str(url_or_domain)
+        d = (d or '').lower()
+        # Prefer site-specific cookies; fallback to YouTube cookies if present
+        if 'youtu' in d:
+            cand = 'cookies/youtube.txt'
+            return cand if os.path.exists(cand) else None
+        if 'instagram' in d:
+            cand = 'cookies/insta.txt'
+            return cand if os.path.exists(cand) else None
+        # Fallback: use YouTube cookies if available (harmless for other domains)
+        cand = 'cookies/youtube.txt'
+        return cand if os.path.exists(cand) else None
+    except Exception:
+        return None
+
 def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | None = None) -> bool:
     try:
         url = f"https://api.telegram.org/bot{config.bot_token}/sendMessage"
@@ -87,7 +112,6 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
             'outtmpl': outtmpl,
             'writethumbnail': True,
             'keepvideo': False,
-            'cookiefile': 'cookies/youtube.txt',
             'noprogress': True,
             'quiet': True,
             'extractor_args': {
@@ -96,6 +120,10 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                 }
             }
         }
+
+        ck = select_cookiefile(video_url)
+        if ck:
+            ydl_opts['cookiefile'] = ck
 
         max_retries = 3
         last_exc = None
@@ -252,13 +280,10 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
 def get_video_formats(url, domain):
     ydl_opts = {
         'listformats': True,
-        'cookiefile': 'cookies/insta.txt'
     }
-    if domain.startswith("youtu"):
-        ydl_opts['cookiefile'] = 'cookies/youtube.txt'
-    
-    if domain == 'instagram.com':
-        ydl_opts['cookiefile'] = 'cookies/insta.txt'
+    ck = select_cookiefile(url or domain)
+    if ck:
+        ydl_opts['cookiefile'] = ck
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info_dict = ydl.extract_info(url, download=False)
@@ -266,7 +291,11 @@ def get_video_formats(url, domain):
 
 def is_youtube_public(url: str) -> bool:
     try:
-        with yt_dlp.YoutubeDL({'listformats': True}) as ydl:
+        opts = {'listformats': True}
+        ck = select_cookiefile(url)
+        if ck:
+            opts['cookiefile'] = ck
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception:
         return False
@@ -354,12 +383,18 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             'noprogress': True,
             'quiet': True
         }
+        ck_all = select_cookiefile(url or domain)
+        if ck_all:
+            ydl_opts['cookiefile'] = ck_all
         if domain == "instagram.com":
-            ydl_opts['cookiefile'] = 'cookies/insta.txt'
             ydl_opts['quiet'] = True
         elif domain.startswith("youtu"):
             try:
-                with yt_dlp.YoutubeDL({'cookiefile': 'cookies/youtube.txt'}) as probe:
+                probe_opts = {}
+                ck = select_cookiefile(url)
+                if ck:
+                    probe_opts['cookiefile'] = ck
+                with yt_dlp.YoutubeDL(probe_opts) as probe:
                     info = probe.extract_info(url, download=False)
             except Exception:
                 info = {}
@@ -374,7 +409,6 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             else:
                 ydl_opts['format'] = f"{video_format}+bestaudio/best"
                 ydl_opts['merge_output_format'] = "mp4"
-            ydl_opts['cookiefile'] = 'cookies/youtube.txt'
             ydl_opts['extractor_args'] = {
                 'youtube': {
                     'player_client': ['android', 'ios', 'web']
@@ -417,7 +451,11 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             return
 
         try:
-            with yt_dlp.YoutubeDL({'cookiefile': 'cookies/youtube.txt', 'quiet': True}) as ydl_info:
+            info_opts = {'quiet': True}
+            ck = select_cookiefile(url)
+            if ck:
+                info_opts['cookiefile'] = ck
+            with yt_dlp.YoutubeDL(info_opts) as ydl_info:
                 info_dict = ydl_info.extract_info(url, download=False)
         except Exception:
             info_dict = {}
