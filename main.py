@@ -267,8 +267,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     mention = f"<a href='tg://user?id={u.id}'>{u.first_name}</a>"
                     await message.bot.send_message(chat_id=config.log_chat,
                                                     text=f"<code>{u.id}</code> {mention} sent:\n{link}",
-                                                    reply_markup=ban_kb(u.id),
-                                                    disable_web_page_preview=True)
+                                                    reply_markup=ban_kb(u.id))
                 except Exception as e:
                     print(f"Log send error: {e}")
             info_dict, ytlog = get_video_formats(link, domain)
