@@ -44,6 +44,13 @@ CHANNEL_LINK=your_channel_link (ex. t.me/***)
 API_ID=your_telegram_app_api_id
 API_HASH=your_telegram_app_api_hash
 ADMIN_LIST=123, 456(where are 123 and 456 - telegram ids of admins)
+# Optional logging chat for admin logs and backups
+LOG_CHAT=your_log_chat_id (ex. -100987654321)
+
+# Optional: pricing and whitelisting
+# STARS_PRICE=1
+# STARS_PREMIUM_PRICE=5
+# FREE_WHITELIST=123,456
 ```
 
 ## Setup Instructions
@@ -67,6 +74,9 @@ ADMIN_LIST=123, 456(where are 123 and 456 - telegram ids of admins)
 ## Notes
 
 - Ensure that your `.env` file is properly configured with the correct values.
+- If `LOG_CHAT` is set, the bot will:
+   - Log each processed link with a ❌BAN button for quick moderation.
+   - Send automatic database backups (`base/db.db`) to the log chat every 3 hours with a timestamped filename.
 
 # 🚀 Usage
 

@@ -11,6 +11,8 @@ admin_list = os.getenv('ADMIN_LIST').split(",")
 stars_price = int(os.getenv('STARS_PRICE', '1'))
 stars_premium_price = int(os.getenv('STARS_PREMIUM_PRICE', '5'))
 free_whitelist = os.getenv('FREE_WHITELIST', '').split(',')
+# Chat ID for logging user link requests (optional)
+log_chat = int(os.getenv('LOG_CHAT')) if os.getenv('LOG_CHAT') else None
 # Control whether to stream yt-dlp output to console (default: True)
 show_yt_dlp_output = os.getenv('SHOW_YT_DLP_OUTPUT', '1').lower() in ('1', 'true', 'yes')
 

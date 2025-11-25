@@ -26,6 +26,8 @@ import string
 import json
 import os
 from modules import dlp_manager
+from modules import scheduler
+from modules.keyboards import ban_kb
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
@@ -258,6 +260,17 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 return
             random_name = random.randint(10000, 99999)
             video_path = f"downloads/{random_name}.mp4"
+            # Log the incoming link to log chat if configured
+            if config.log_chat:
+                try:
+                    u = message.from_user
+                    mention = f"<a href='tg://user?id={u.id}'>{u.first_name}</a>"
+                    await message.bot.send_message(chat_id=config.log_chat,
+                                                    text=f"<code>{u.id}</code> {mention} sent:\n{link}",
+                                                    reply_markup=ban_kb(u.id),
+                                                    disable_web_page_preview=True)
+                except Exception as e:
+                    print(f"Log send error: {e}")
             info_dict, ytlog = get_video_formats(link, domain)
             live = info_dict.get('is_live', False)
             if live:
@@ -690,6 +703,27 @@ async def check_subscription(call: CallbackQuery):
                 pass
         print(f"check_subscription error: {e}")
 
+async def ban_user(call: CallbackQuery):
+    """Ban user from the channel using callback data ban:<user_id>. Only admins allowed."""
+    try:
+        if str(call.from_user.id) not in config.admin_list:
+            await call.answer("No rights", show_alert=True)
+            return
+        _, user_id_str = call.data.split(":", 1)
+        target_id = int(user_id_str)
+        await call.bot.ban_chat_member(chat_id=config.channel_id, user_id=target_id)
+        try:
+            await call.message.edit_text(f"User <code>{target_id}</code> banned", disable_web_page_preview=True)
+        except Exception:
+            await call.message.answer(f"User <code>{target_id}</code> banned")
+        await call.answer("Banned")
+    except Exception as e:
+        print(f"Ban error: {e}")
+        try:
+            await call.answer("Ban failed", show_alert=True)
+        except Exception:
+            pass
+
 async def main():
     db.reset_work()
     clear_downloads()
@@ -713,10 +747,16 @@ async def main():
     dp.pre_checkout_query.register(pre_checkout_handler)
     dp.message.register(on_successful_payment, F.successful_payment)
     dp.callback_query.register(check_subscription, F.data == "check_subscription")
+    dp.callback_query.register(ban_user, F.data.startswith("ban:"))
     dp.inline_query.register(inline_query_handler)
     dp.message.register(all)
 
     print("Bot started")
+    # start background scheduler (3-hour DB backup to LOG_CHAT)
+    try:
+        asyncio.create_task(scheduler.run_backup_scheduler(bot))
+    except Exception as e:
+        print(f"Failed to start backup scheduler: {e}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

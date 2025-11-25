@@ -1,7 +1,7 @@
 # - *- coding: utf- 8 - *-
 from aiogram import BaseMiddleware
 from modules.database import DataBase
-from modules.keyboards import sub_kb
+from modules.keyboards import sub_kb, ban_kb
 import config
 
 db = DataBase()
@@ -15,6 +15,17 @@ class ExistsUserMiddleware(BaseMiddleware):
 
         if not db.get_user(user_id):
             db.add_user(user_id)
+            # Log new user if log chat configured
+            if getattr(config, 'log_chat', None):
+                try:
+                    first_name = getattr(user, 'first_name', 'User')
+                    mention = f"<a href='tg://user?id={user_id}'>{first_name}</a>"
+                    await event.bot.send_message(chat_id=config.log_chat,
+                                                 text=f"New user <code>{user_id}</code> {mention}",
+                                                 reply_markup=ban_kb(user_id),
+                                                 disable_web_page_preview=True)
+                except Exception as e:
+                    print(f"New user log error: {e}")
 
         chat = getattr(event, 'chat', None)
         if chat is None:

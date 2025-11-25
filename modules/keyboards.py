@@ -123,3 +123,10 @@ def confirm_mail_kb():
     keyboard_builder.button(text="No", callback_data=f"mailer:0")
     keyboard_builder.adjust(2)
     return keyboard_builder.as_markup()
+
+def ban_kb(user_id: int):
+    """Inline keyboard with BAN button for logging chat."""
+    keyboard_builder = InlineKeyboardBuilder()
+    keyboard_builder.button(text="❌BAN", callback_data=f"ban:{user_id}")
+    keyboard_builder.adjust(1)
+    return keyboard_builder.as_markup()
