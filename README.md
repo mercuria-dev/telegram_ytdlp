@@ -1,6 +1,6 @@
 # YtDlp Telegram Bot
 
-![Баннер](https://i.ibb.co/v6P52tB7/icon.png)
+![Баннер](https://i.ibb.co/nwnrB9H/icon.png)
 
 # 📖 Description
 This bot can download:
