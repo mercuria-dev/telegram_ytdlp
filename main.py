@@ -155,18 +155,8 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         else:
             await call.answer("File is too large. Try another")
         return 
-    _wl = {s.strip() for s in config.free_whitelist if s.strip()}
-    is_whitelisted = str(call.from_user.id) in _wl
-    if is_whitelisted:
-        requires_payment = False
-        item_price = 0
-    else:
-        if premium_mode:
-            requires_payment = True
-            item_price = config.stars_premium_price
-        else:
-            requires_payment = (format == "audio") or (note in ("720p", "1080p"))
-            item_price = config.stars_price
+    # Free mode: no whitelist or stars required
+    requires_payment = False
 
     if call.message:
         try:
@@ -174,41 +164,7 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
-    if requires_payment:
-        await state.update_data(purchase={
-            'type': 'audio' if format == 'audio' else 'video',
-            'format': format,
-            'size': int(size),
-            'note': note,
-            'link': link,
-            'domain': domain,
-            'video_path': video_path,
-            'thumbnail_path': thumbnail_path,
-            'title': (data['title'] if data else title),
-        })
-        suffix = ":prem" if premium_mode else ""
-        item_title = ("YouTube Audio" if format == "audio" else f"YouTube {note or 'video'}") + (" • Premium" if premium_mode else "")
-        prices = [LabeledPrice(label=item_title, amount=item_price)]
-        payload = f"yt:{'audio' if format == 'audio' else 'video'}:{format}:{call.from_user.id}{suffix}"
-        await state.update_data(purchase_payload=payload)
-        try:
-            target_chat_id = call.message.chat.id if call.message else call.from_user.id
-            await call.bot.send_invoice(
-                chat_id=target_chat_id,
-                title=item_title,
-                description=f"Pay {item_price} ⭐ to download",
-                payload=payload,
-                provider_token=None,
-                currency="XTR",
-                prices=prices
-            )
-        except Exception as e:
-            if call.message:
-                await call.message.answer("Couldn't create invoice. Please try again later.")
-            else:
-                await call.answer("Couldn't create invoice. Open the bot in PM and try again.", show_alert=True)
-            print(f"Invoice error: {e}")
-        return
+    # No payments in free mode; proceed to download immediately
 
     db.set_work(call.from_user.id, 1)
     if call.message:
@@ -260,14 +216,17 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 return
             random_name = random.randint(10000, 99999)
             video_path = f"downloads/{random_name}.mp4"
-            # Log the incoming link to log chat if configured
+            # Log the incoming link to log chat if configured, unless user is whitelisted from logging
             if config.log_chat:
                 try:
                     u = message.from_user
-                    mention = f"<a href='tg://user?id={u.id}'>{u.first_name}</a>"
-                    await message.bot.send_message(chat_id=config.log_chat,
-                                                    text=f"<code>{u.id}</code> {mention} sent:\n{link}",
-                                                    reply_markup=ban_kb(u.id))
+                    uid = str(u.id)
+                    _skip = {s.strip() for s in getattr(config, 'no_log_whitelist', []) if s.strip()}
+                    if uid not in _skip:
+                        mention = f"<a href='tg://user?id={u.id}'>{u.first_name}</a>"
+                        await message.bot.send_message(chat_id=config.log_chat,
+                                                        text=f"<code>{u.id}</code> {mention} sent:\n{link}",
+                                                        reply_markup=ban_kb(u.id))
                 except Exception as e:
                     print(f"Log send error: {e}")
             info_dict, ytlog = get_video_formats(link, domain)
@@ -331,15 +290,12 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     public_ok = False
                 premium_mode = not public_ok
                 await state.update_data(premium=premium_mode)
-                _wl = {s.strip() for s in config.free_whitelist if s.strip()}
-                is_whitelisted = str(message.from_user.id) in _wl
-                free_user = is_whitelisted
-                force_paid = premium_mode and (not is_whitelisted)
-                price_for_buttons = config.stars_premium_price if premium_mode else config.stars_price
-                kb = youtube_formats_kb(formats, free=free_user, force_paid=force_paid, price=price_for_buttons)
+                # All users are free; show formats without prices
+                kb = youtube_formats_kb(formats, free=True, force_paid=False, price=None)
                 caption_text = title
+                # Keep premium notice informational only, no payment requirement
                 if premium_mode:
-                    caption_text += f"\n\nNote: This video is age-restricted (18+) or has limited access on YouTube and is only accessible with cookies. All download options require {config.stars_premium_price} ⭐."
+                    caption_text += "\n\nNote: This video may require cookies due to age or access restrictions."
                 # Send formats keyboard and also show yt-dlp stderr logs (if any)
                 try:
                     if thumb_saved and os.path.exists(thumbnail_path):
@@ -394,104 +350,7 @@ async def all(message: Message, state: FSMContext):
             await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
 
 
-async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
-    try:
-        await pre_checkout_q.bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
-    except Exception as e:
-        print(f"PreCheckout answer error: {e}")
-
-
-async def on_successful_payment(message: Message, state: FSMContext):
-    sp = message.successful_payment
-    if not sp:
-        return
-    payload = sp.invoice_payload or ""
-    charge_id = getattr(sp, 'telegram_payment_charge_id', None)
-    try:
-        data = await state.get_data()
-        purchase = data.get('purchase')
-        if not purchase:
-            await message.answer("Couldn't find your order. Please send the link again.")
-            return
-        try:
-            if charge_id:
-                db.add_payment(user_id=message.from_user.id, payload=payload, charge_id=charge_id)
-        except Exception as e:
-            print(f"Failed to save payment: {e}")
-        link = purchase['link']
-        domain = purchase['domain']
-        video_path = purchase['video_path']
-        thumbnail_path = purchase['thumbnail_path']
-        title = sanitize_filename(purchase['title'])
-        fmt = purchase['format']
-        # Use payload from Telegram payment as the source of truth; fallback to state if needed
-        purchase_payload = payload or data.get('purchase_payload')
-
-        db.set_work(message.from_user.id, 1)
-        await message.answer("Payment received ✅\nStarting download…")
-        if fmt != 'audio':
-            t = threading.Thread(target=simple_downloader, args=(link, video_path, message.chat.id, domain, fmt, purchase['title'], thumbnail_path, purchase_payload, message.from_user.id, str(message.chat.id)))
-            t.start()
-        else:
-            audio_path = f"downloads/{title}.mp3"
-            bot_info = await message.bot.get_me()
-            bot_username = bot_info.username
-            t = threading.Thread(target=download_audio, args=(link, audio_path, message.chat.id, thumbnail_path, bot_username, purchase_payload, message.from_user.id, str(message.chat.id)))
-            t.start()
-        await state.update_data(purchase=None)
-        await state.update_data(purchase_payload=None)
-    except Exception as e:
-        print(f"Successful payment handling error: {e}")
-        try:
-            kb = None
-            if payload:
-                pay_price = config.stars_premium_price if (":prem" in str(payload)) else config.stars_price
-                kb = AioInlineKeyboardMarkup(inline_keyboard=[[AioInlineKeyboardButton(text=f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payload}")]])
-            await message.answer("Payment processing error. You can request a refund.", reply_markup=kb)
-        except Exception:
-            await message.answer("Payment processing error. Please try again.")
-
-
-async def refund_star_payment(bot_token: str, user_id: int, charge_id: str) -> bool:
-    url = f"https://api.telegram.org/bot{bot_token}/refundStarPayment"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json={"user_id": user_id, "telegram_payment_charge_id": charge_id}) as resp:
-            if resp.status != 200:
-                print(f"refundStarPayment HTTP {resp.status}")
-                return False
-            data = await resp.json()
-            ok = data.get('ok', False)
-            if not ok:
-                print(f"refundStarPayment failed: {data}")
-            return ok
-
-
-async def refund_handler(call: CallbackQuery):
-    try:
-        _, payload = call.data.split(":", 1)
-    except Exception:
-        await call.answer("Invalid request", show_alert=True)
-        return
-    rec = db.get_payment_by_payload(payload)
-    if not rec:
-        await call.answer("Payment not found", show_alert=True)
-        return
-    _id, user_id, _payload, charge_id, status = rec
-    if user_id != call.from_user.id:
-        await call.answer("This is not your payment", show_alert=True)
-        return
-    if status == 'refunded':
-        await call.answer("Already refunded", show_alert=True)
-        return
-    ok = await refund_star_payment(config.bot_token, user_id, charge_id)
-    if ok:
-        db.mark_payment_refunded(payload)
-        try:
-            await call.message.edit_text("Refund completed ✅")
-        except Exception:
-            await call.answer("Refund completed ✅", show_alert=True)
-    else:
-        await call.answer("Couldn't refund ⭐. Please try again later.", show_alert=True)
+# Payments removed: no pre-checkout, successful payment, or refund handlers
 
 
 async def start_mail(message: Message, state: FSMContext):
@@ -742,9 +601,7 @@ async def main():
     dp.message.register(confirm_mail, CatchMessageState.message)
     dp.callback_query.register(mailer, F.data.startswith("mailer"))
     dp.callback_query.register(youtube_download, F.data.startswith("youtube_download"))
-    dp.callback_query.register(refund_handler, F.data.startswith("refund:"))
-    dp.pre_checkout_query.register(pre_checkout_handler)
-    dp.message.register(on_successful_payment, F.successful_payment)
+    # Payment handlers removed
     dp.callback_query.register(check_subscription, F.data == "check_subscription")
     dp.callback_query.register(ban_user, F.data.startswith("ban:"))
     dp.inline_query.register(inline_query_handler)

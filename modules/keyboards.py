@@ -14,7 +14,7 @@ def sub_kb():
 def remove_kb():
     return ReplyKeyboardRemove()
 
-def youtube_formats_kb(formats, free: bool = False, force_paid: bool = False, price: int | None = None, token: str | None = None):
+def youtube_formats_kb(formats, free: bool = True, force_paid: bool = False, price: int | None = None, token: str | None = None):
     keyboard_builder = InlineKeyboardBuilder()
     best_by_note = {}
 
@@ -72,7 +72,7 @@ def youtube_formats_kb(formats, free: bool = False, force_paid: bool = False, pr
 
     if not best_by_note:
         keyboard_builder.row(
-            types.InlineKeyboardButton(text=("🎧 Audio" if free else f"🎧 Audio ({config.stars_price}⭐)"), callback_data="youtube_download:audio:0:audio"),
+            types.InlineKeyboardButton(text="🎧 Audio", callback_data="youtube_download:audio:0:audio"),
         )
         return keyboard_builder.as_markup()
 
@@ -84,37 +84,21 @@ def youtube_formats_kb(formats, free: bool = False, force_paid: bool = False, pr
         size = int(f.get('_size_for_btn', 0) or 0)
         suffix = f":{token}" if token else ""
         if note == "720p":
-            if force_paid:
-                label = f"720p ({(price or config.stars_price)}⭐)"
-            else:
-                label = "720p" if free else f"720p ({config.stars_price}⭐)"
-            btn_720 = types.InlineKeyboardButton(text=label, callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
+            btn_720 = types.InlineKeyboardButton(text="720p", callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
             continue
         if note == "1080p":
-            if force_paid:
-                label = f"1080p ({(price or config.stars_price)}⭐)"
-            else:
-                label = "1080p" if free else f"1080p ({config.stars_price}⭐)"
-            btn_1080 = types.InlineKeyboardButton(text=label, callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
+            btn_1080 = types.InlineKeyboardButton(text="1080p", callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
             continue
-        if force_paid:
-            keyboard_builder.button(text=f"{note} ({(price or config.stars_price)}⭐)", callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
-        else:
-            keyboard_builder.button(text=note, callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
+        keyboard_builder.button(text=note, callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
 
     keyboard_builder.adjust(6)
     if btn_720 is not None:
         keyboard_builder.row(btn_720)
     if btn_1080 is not None:
         keyboard_builder.row(btn_1080)
-    if force_paid:
-        keyboard_builder.row(
-            types.InlineKeyboardButton(text=f"🎧 Audio ({(price or config.stars_price)}⭐)", callback_data=f"youtube_download:audio:0:audio{suffix}"),
-        )
-    else:
-        keyboard_builder.row(
-            types.InlineKeyboardButton(text=("🎧 Audio" if free else f"🎧 Audio ({config.stars_price}⭐)"), callback_data=f"youtube_download:audio:0:audio{suffix}"),
-        )
+    keyboard_builder.row(
+        types.InlineKeyboardButton(text="🎧 Audio", callback_data=f"youtube_download:audio:0:audio{suffix}"),
+    )
     return keyboard_builder.as_markup()
 
 def confirm_mail_kb():

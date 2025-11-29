@@ -35,22 +35,19 @@ To enhance the scraping of YouTube and Instagram, you need to provide Netscape c
 
 ### 3. Configure Environment Variables
 
-Add the following information to your `.env` file:
+Add the following information to your `.env` file (the bot is fully free — no payments):
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
-CHANNEL_ID=your_channel_id (ex. -100123123123) 
+CHANNEL_ID=your_channel_id (ex. -100123123123)
 CHANNEL_LINK=your_channel_link (ex. t.me/***)
 API_ID=your_telegram_app_api_id
 API_HASH=your_telegram_app_api_hash
-ADMIN_LIST=123, 456(where are 123 and 456 - telegram ids of admins)
+ADMIN_LIST=123,456   # telegram user IDs of admins
 # Optional logging chat for admin logs and backups
 LOG_CHAT=your_log_chat_id (ex. -100987654321)
-
-# Optional: pricing and whitelisting
-# STARS_PRICE=1
-# STARS_PREMIUM_PRICE=5
-# FREE_WHITELIST=123,456
+# Optional: do not log links for these user IDs in LOG_CHAT
+NO_LOG_WHITELIST=123,456 # telegram user IDs
 ```
 
 ## Setup Instructions

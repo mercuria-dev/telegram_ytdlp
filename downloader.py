@@ -80,13 +80,7 @@ def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | N
             'text': text,
             'disable_web_page_preview': 'true'
         }
-        if payment_payload:
-            # Build inline keyboard with refund button
-            pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
-            kb = {
-                "inline_keyboard": [[{"text": f"🔄 Refund {pay_price}⭐", "callback_data": f"refund:{payment_payload}"}]]
-            }
-            data['reply_markup'] = json.dumps(kb)
+        # No refund buttons in free mode
         resp = requests.post(url, data=data, timeout=30)
         if resp.status_code != 200:
             return False
@@ -173,19 +167,13 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
         if last_exc is not None:
             # Prefer Bot API notification so we don't hit Pyrogram peer issues
             msg = str(last_exc)
-            sent = bot_api_send_message(chat_id, f"Download failed after {max_retries} attempts: {msg}", payment_payload)
+            sent = bot_api_send_message(chat_id, f"Download failed after {max_retries} attempts: {msg}")
             if not sent:
                 try:
                     session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
                     app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                     app.start()
-                    kb = None
-                    if payment_payload:
-                        pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
-                        kb = InlineKeyboardMarkup(
-                            [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
-                        )
-                    app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
+                    app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}")
                     app.stop()
                     delete_pyrogram_session_files(session_base)
                 except Exception:
@@ -255,8 +243,8 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                     delete_pyrogram_session_files(session_base)
                 except Exception as e2:
                     print(f"Failed to send audio (both Bot API and Pyrogram): {e} | {e2}")
-                    # Inform user and offer refund
-                    bot_api_send_message(chat_id, f"Send failed: {e2}", payment_payload)
+                    # Inform user
+                    bot_api_send_message(chat_id, f"Send failed: {e2}")
                     db.set_work(user_id_for_work or chat_id, 0)
                     try:
                         delete_file(output_path)
@@ -271,7 +259,7 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                 app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
             except Exception as e:
                 print(f"Failed to send audio: {e}")
-                bot_api_send_message(chat_id, f"Send failed: {e}", payment_payload)
+                bot_api_send_message(chat_id, f"Send failed: {e}")
                 app.stop()
                 delete_pyrogram_session_files(session_base)
                 db.set_work(user_id_for_work or chat_id, 0)
@@ -292,13 +280,7 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
             session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
             app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
             app.start()
-            kb = None
-            if payment_payload:
-                pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
-                kb = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
-                )
-            app.send_message(chat_id=chat_id, text=f"Download error: {e}", reply_markup=kb)
+            app.send_message(chat_id=chat_id, text=f"Download error: {e}")
             app.stop()
             delete_pyrogram_session_files(session_base)
         except Exception:
@@ -502,19 +484,13 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
 
         if last_exc is not None:
             msg = str(last_exc)
-            sent = bot_api_send_message(chat_id, f"Download failed after {max_retries} attempts: {msg}", payment_payload)
+            sent = bot_api_send_message(chat_id, f"Download failed after {max_retries} attempts: {msg}")
             if not sent:
                 try:
                     session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
                     app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                     app.start()
-                    kb = None
-                    if payment_payload:
-                        pay_price = config.stars_premium_price if (":prem" in str(payment_payload)) else config.stars_price
-                        kb = InlineKeyboardMarkup(
-                            [[InlineKeyboardButton(f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payment_payload}")]]
-                        )
-                    app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}", reply_markup=kb)
+                    app.send_message(chat_id=chat_id, text=f"Download failed after {max_retries} attempts: {msg}")
                     app.stop()
                     delete_pyrogram_session_files(session_base)
                 except Exception:
@@ -584,7 +560,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     delete_pyrogram_session_files(session_base)
                 except Exception as e2:
                     print(f"Failed to send video (both Bot API and Pyrogram): {e} | {e2}")
-                    bot_api_send_message(chat_id, f"Send failed: {e2}", payment_payload)
+                    bot_api_send_message(chat_id, f"Send failed: {e2}")
                     db.set_work(user_id_for_work or chat_id, 0)
                     try:
                         delete_file(output_path)
@@ -602,7 +578,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
             except Exception as e:
                 print(f"Failed to send video: {e}")
-                bot_api_send_message(chat_id, f"Send failed: {e}", payment_payload)
+                bot_api_send_message(chat_id, f"Send failed: {e}")
                 app.stop()
                 delete_pyrogram_session_files(session_base)
                 db.set_work(user_id_for_work or chat_id, 0)
@@ -644,7 +620,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     delete_pyrogram_session_files(session_base)
         except Exception:
             # Prefer Bot API error notification
-            bot_api_send_message(chat_id, f"Download error: {e}", payment_payload)
+            bot_api_send_message(chat_id, f"Download error: {e}")
     db.set_work(user_id_for_work or chat_id, 0)
     delete_file(output_path)
 
