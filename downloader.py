@@ -448,6 +448,39 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                 if str(f.get('format_id')) == str(video_format):
                     selected = f
                     break
+
+            # Если есть набор форматов с разными языками для одного и того же качества,
+            # и среди них есть вариант с меткой (original), то для этого качества
+            # всегда берём именно (original), независимо от того, на какой язык нажал пользователь.
+            try:
+                if isinstance(selected, dict) and fmts:
+                    sel_height = selected.get('height')
+                    sel_fps = selected.get('fps')
+                    # Посчитаем, сколько языков есть для этого качества
+                    same_quality = []
+                    for fm in fmts:
+                        if fm.get('vcodec') == 'images':
+                            continue
+                        if sel_height is not None and fm.get('height') != sel_height:
+                            continue
+                        if sel_fps is not None and fm.get('fps') != sel_fps:
+                            continue
+                        same_quality.append(fm)
+                    if len(same_quality) > 1:
+                        # Есть несколько языков -> ищем (original)
+                        original_fmt = None
+                        for fm in same_quality:
+                            note = (fm.get('format_note') or '').lower()
+                            # yt-dlp обычно пишет "[en-US] (original)" в конце MORE INFO
+                            if '(original)' in note or '[en-us] (original)' in note:
+                                original_fmt = fm
+                                break
+                        if original_fmt is not None:
+                            selected = original_fmt
+                            video_format = selected.get('format_id', video_format)
+            except Exception:
+                pass
+
             if selected and selected.get('acodec') and selected.get('acodec') != 'none':
                 ydl_opts['format'] = str(video_format)
             else:
