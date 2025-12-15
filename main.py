@@ -240,14 +240,28 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 await message.answer("Download started")
                 title = sanitize_filename(title_orig)
                 audio_path = f"downloads/{title}.mp3"
-                try:
-                    thumb = info_dict['thumbnails'][7]['url']
-                except:
-                    thumb = info_dict['thumbnails'][-1]['url']
+                # Robust thumbnail picking: iterate available entries and pick first valid URL
+                thumb = None
+                th_list = info_dict.get('thumbnails') or []
+                if isinstance(th_list, list):
+                    for th in th_list:
+                        u = th.get('url') if isinstance(th, dict) else None
+                        if looks_like_image_url(u):
+                            thumb = u
+                            break
+                    if not thumb and th_list:
+                        # Fallback: try last entry if any
+                        last = th_list[-1]
+                        thumb = last.get('url') if isinstance(last, dict) else None
                 thumbnail_path = video_path.replace("mp4", "jpg")
-                response = requests.get(thumb)
-                with open(thumbnail_path, 'wb') as file:
-                    file.write(response.content)
+                if thumb:
+                    try:
+                        response = requests.get(thumb, timeout=10)
+                        if response.ok and response.content:
+                            with open(thumbnail_path, 'wb') as file:
+                                file.write(response.content)
+                    except Exception:
+                        pass
                 bot_info = await message.bot.get_me()
                 bot_username = bot_info.username
 
