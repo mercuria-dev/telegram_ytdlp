@@ -23,3 +23,23 @@ yt_dlp_executable = os.getenv('YTDLP_EXECUTABLE') or None
 # Preferred platform for yt-dlp executable: 'windows', 'linux', or 'auto'
 # If 'auto', the runtime platform will be used to pick the executable from dlp/ (or fallback to PATH)
 yt_dlp_platform = os.getenv('YTDLP_PLATFORM', 'auto').lower()
+
+# yt-dlp tuning knobs.
+#
+# EJS/YouTube JS challenge solving: point yt-dlp at a JS runtime.
+# Examples:
+#   YTDLP_JS_RUNTIMES=node
+#   YTDLP_JS_RUNTIMES=node:C:\\Program Files\\nodejs\\node.exe
+#   YTDLP_REMOTE_COMPONENTS=ejs:github
+yt_dlp_js_runtimes = os.getenv('YTDLP_JS_RUNTIMES', '').strip()
+yt_dlp_remote_components = os.getenv('YTDLP_REMOTE_COMPONENTS', '').strip()
+
+# YouTube extractor args.
+# Default uses `tv` client to avoid PO Token issues (web/android/ios often require PO tokens and/or SABR).
+# You can override per your needs.
+# Examples:
+#   YTDLP_YOUTUBE_CLIENTS=tv
+#   YTDLP_YOUTUBE_CLIENTS=web_safari
+#   YTDLP_YOUTUBE_EXTRACTOR_ARGS=player_skip=webpage
+yt_dlp_youtube_clients = os.getenv('YTDLP_YOUTUBE_CLIENTS', 'tv').strip()
+yt_dlp_youtube_extractor_args = os.getenv('YTDLP_YOUTUBE_EXTRACTOR_ARGS', '').strip()

@@ -1,6 +1,7 @@
 
 import os
 import subprocess
+import shutil
 from pyrogram import Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import config
@@ -15,6 +16,58 @@ import json
 import requests
 
 db = DataBase()
+
+
+def _is_youtube(url_or_domain: str | None) -> bool:
+    try:
+        if not url_or_domain:
+            return False
+        s = str(url_or_domain).lower()
+        if re.match(r'^https?://', s):
+            d = get_domain(s) or ''
+            return 'youtu' in d.lower()
+        return 'youtu' in s
+    except Exception:
+        return False
+
+
+def _youtube_extractor_args() -> list[str]:
+    """Return yt-dlp CLI args to reduce YouTube EJS/n-challenge breakage."""
+    try:
+        clients = (getattr(config, 'yt_dlp_youtube_clients', None) or '').strip()
+        extra = (getattr(config, 'yt_dlp_youtube_extractor_args', None) or '').strip()
+
+        parts: list[str] = []
+        if clients:
+            parts.append(f"player_client={clients}")
+        if extra:
+            parts.append(extra.strip('; '))
+
+        if not parts:
+            return []
+        return ['--extractor-args', f"youtube:{';'.join(parts)}"]
+    except Exception:
+        return []
+
+
+def _yt_dlp_runtime_args() -> list[str]:
+    """Return global yt-dlp args (JS runtime + remote EJS components), if configured."""
+    try:
+        out: list[str] = []
+        jsr = (getattr(config, 'yt_dlp_js_runtimes', None) or '').strip()
+        if not jsr:
+            # Deno is "enabled by default" in yt-dlp, but it is usually not installed on Windows.
+            # If Node.js is present, enabling it fixes EJS/n-challenge for YouTube.
+            if shutil.which('node'):
+                jsr = 'node'
+        rc = (getattr(config, 'yt_dlp_remote_components', None) or '').strip()
+        if jsr:
+            out += ['--js-runtimes', jsr]
+        if rc:
+            out += ['--remote-components', rc]
+        return out
+    except Exception:
+        return []
 
 
 def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: bool = False):
@@ -37,9 +90,13 @@ def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: b
 
 
 def get_info_json(url, cookiefile=None):
-    args = ["--dump-single-json", "--no-warnings", "--no-progress", url]
+    args = ["--dump-single-json", "--no-warnings", "--no-progress"]
     if cookiefile:
         args = ["--cookies", cookiefile] + args
+    args += _yt_dlp_runtime_args()
+    if _is_youtube(url):
+        args += _youtube_extractor_args()
+    args += [url]
     out = run_yt_dlp_process(args, capture_output=True)
     try:
         return json.loads(out)
@@ -153,6 +210,9 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
         # Always show progress/logs for yt-dlp (do not add quiet/no-progress)
         if ck:
             args = ['--cookies', ck] + args
+        args += _yt_dlp_runtime_args()
+        if _is_youtube(video_url):
+            args += _youtube_extractor_args()
 
         for attempt in range(1, max_retries + 1):
             try:
@@ -295,9 +355,13 @@ def get_video_formats(url, domain):
     ck = select_cookiefile(url or domain)
     try:
         # capture stderr/logs as well so caller can display them
-        args = ["--dump-single-json", "--no-warnings", "--no-progress", url]
+        args = ["--dump-single-json", "--no-warnings", "--no-progress"]
         if ck:
             args = ["--cookies", ck] + args
+        args += _yt_dlp_runtime_args()
+        if _is_youtube(url or domain):
+            args += _youtube_extractor_args()
+        args += [url]
         out, err = run_yt_dlp_process(args, capture_output=True, return_stderr=True)
         try:
             info = json.loads(out)
@@ -306,9 +370,13 @@ def get_video_formats(url, domain):
 
         # Always run a streaming `--list-formats` so formats appear in console in real time.
         try:
-            lf_args = ["--list-formats", url]
+            lf_args = ["--list-formats"]
             if ck:
                 lf_args = ["--cookies", ck] + lf_args
+            lf_args += _yt_dlp_runtime_args()
+            if _is_youtube(url or domain):
+                lf_args += _youtube_extractor_args()
+            lf_args += [url]
             try:
                 exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
                 cmd = [exe] + lf_args
@@ -486,11 +554,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             else:
                 ydl_opts['format'] = f"{video_format}+bestaudio/best"
                 ydl_opts['merge_output_format'] = "mp4"
-            ydl_opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['android', 'ios', 'web']
-                }
-            }
+            # NOTE: extractor args must be passed as CLI flags; see _youtube_extractor_args()
         # Build args for yt-dlp CLI
         args = []
         if ydl_opts.get('format'):
@@ -502,6 +566,9 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             args += ['--merge-output-format', ydl_opts['merge_output_format']]
         if ck_all:
             args = ['--cookies', ck_all] + args
+        args += _yt_dlp_runtime_args()
+        if domain and domain.startswith('youtu'):
+            args += _youtube_extractor_args()
 
         max_retries = 3
         last_exc = None

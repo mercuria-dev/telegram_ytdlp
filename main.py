@@ -272,7 +272,8 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 return
             elif domain.find("youtu") > -1:
                 formats = info_dict.get('formats', [])
-                if info_dict['live_status'] == 'is_live':
+                live = info_dict.get('is_live', False)
+                if live:
                     await message.answer("Live streams are restricted!")
                     return
 
