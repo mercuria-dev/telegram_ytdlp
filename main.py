@@ -336,6 +336,9 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
         await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
 
 async def all(message: Message, state: FSMContext):
+    # Channel connected to chat events + anonymous users off
+    if message.from_user.id in [777000, 1087968824, 136817688]:
+        return
     try:
         chat_type = getattr(message.chat, 'type', 'private')
         text = message.text or ""
