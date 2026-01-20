@@ -203,6 +203,8 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 await message.answer("Please send a direct video link without the list= parameter (playlists are ignored).")
                 return
             if domain == "vk.com":
+                if link.find("vk.com/video") == -1 and link.find("vk.com/clip") == -1:
+                    return
                 if link.find("@") > -1:
                     return
             elif domain == "vkvideo.ru":
