@@ -17,6 +17,7 @@ from modules.middleware.exists_user import ExistsUserMiddleware
 from modules.middleware.throttling import ThrottlingMiddleware
 from aiogram.fsm.context import FSMContext
 from downloader import *
+from downloader import generate_download_id, cancel_download_process, send_download_started_message, update_download_message
 import threading
 import traceback
 import requests
@@ -123,19 +124,38 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             return
         link = context.get('link')
         domain = context.get('domain')
-        title = sanitize_filename(context.get('title') or 'Video')
+        
+        # Получаем информацию о видео через yt-dlp для точного названия
+        try:
+            info_dict, _ = get_video_formats(link, domain)
+            video_title = info_dict.get('title', 'Video')
+            # Получаем thumbnail URL для сохранения
+            thumb_url = info_dict.get('thumbnail')
+            if not looks_like_image_url(thumb_url):
+                for th in (info_dict.get('thumbnails') or []):
+                    u = th.get('url') if isinstance(th, dict) else None
+                    if looks_like_image_url(u):
+                        thumb_url = u
+                        break
+        except Exception:
+            video_title = context.get('title', 'Video')
+            thumb_url = context.get('thumbnail_url')
+        
+        title = sanitize_filename(video_title)
         random_name = random.randint(10000, 99999)
         video_path = f"downloads/{random_name}.mp4"
         thumbnail_path = video_path.replace("mp4", "jpg")
-        thumb_url = context.get('thumbnail_url')
-        try:
-            if looks_like_image_url(thumb_url):
+        
+        # Сохраняем thumbnail если есть URL
+        if thumb_url and looks_like_image_url(thumb_url):
+            try:
                 response = requests.get(thumb_url, timeout=10)
                 if response.ok and response.content:
                     with open(thumbnail_path, 'wb') as file:
                         file.write(response.content)
-        except Exception:
-            pass
+            except Exception:
+                pass
+        
         try:
             public_ok = is_youtube_public(link) if domain and 'youtu' in domain else True
         except Exception:
@@ -167,10 +187,6 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
     # No payments in free mode; proceed to download immediately
 
     db.set_work(call.from_user.id, 1)
-    if call.message:
-        await call.message.answer("Download started")
-    else:
-        await call.answer("Download started. I'll send it to you in PM.")
     target_chat_id = call.message.chat.id if call.message else call.from_user.id
 
     sess_id = None
@@ -183,16 +199,54 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         else:
             sess_id = str(target_chat_id)
 
+    # Генерируем уникальный ID для загрузки
+    download_id = generate_download_id(call.from_user.id)
+    
+    # Сохраняем информацию о загрузке в БД
+    db.add_active_download(
+        download_id=download_id,
+        user_id=call.from_user.id,
+        chat_id=target_chat_id,
+        url=link,
+        format_id=format if format != "audio" else "audio",
+        file_path=video_path if format != "audio" else f"downloads/{title}.mp3"
+    )
+
     if format != "audio":
-        title_for_send = data['title'] if data else title
-        my_thread = threading.Thread(target=simple_downloader, args=(link, video_path, target_chat_id, domain, format, title_for_send, thumbnail_path, None, call.from_user.id, sess_id))
+        title_for_send = title  # Используем title из context или data
+        # Используем новую функцию с поддержкой отмены
+        my_thread = threading.Thread(
+            target=simple_downloader_with_cancel, 
+            args=(link, video_path, target_chat_id, domain, format, title_for_send, 
+                  thumbnail_path, call.from_user.id, sess_id, download_id)
+        )
         my_thread.start()
     else:
         audio_path = f"downloads/{title}.mp3"
         bot_info = await call.bot.get_me()
         bot_username = bot_info.username
-        my_thread = threading.Thread(target=download_audio, args=(link, audio_path, target_chat_id, thumbnail_path, bot_username, None, call.from_user.id, sess_id))
+        # Используем новую функцию с поддержкой отмены
+        my_thread = threading.Thread(
+            target=download_audio_with_cancel, 
+            args=(link, audio_path, target_chat_id, thumbnail_path, bot_username, 
+                  call.from_user.id, sess_id, download_id)
+        )
         my_thread.start()
+    
+        # Отправляем сообщение о начале загрузки с кнопкой отмены
+    # Только если не в inline-режиме (в inline нельзя отправлять сообщения)
+    if call.message:
+        try:
+            message_id = send_download_started_message(target_chat_id, download_id, link)
+            # ID сообщения можно сохранить для будущего обновления
+        except Exception as e:
+            print(f"Failed to send download started message: {e}")
+    else:
+        # В inline-режиме просто отвечаем callback
+        try:
+            await call.answer("Загрузка начата...")
+        except:
+            pass
 
 async def process_link_message(message: Message, state: FSMContext, link: str):
     try:
@@ -239,7 +293,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
             title_orig = info_dict.get('title', 'No name')
 
             if domain.find("soundcloud.com") > -1:
-                await message.answer("Download started")
+                # Сообщение о начале загрузки будет отправлено через send_download_started_message
                 title = sanitize_filename(title_orig)
                 audio_path = f"downloads/{title}.mp3"
                 # Robust thumbnail picking: iterate available entries and pick first valid URL
@@ -267,8 +321,21 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 bot_info = await message.bot.get_me()
                 bot_username = bot_info.username
 
-                my_thread = threading.Thread(target=download_audio, args=(link, audio_path, message.chat.id, thumbnail_path, bot_username, None, message.from_user.id, str(message.chat.id)))
+                # Генерируем ID для загрузки
+                download_id = generate_download_id(message.from_user.id)
+                # Сохраняем информацию о загрузке в БД
+                db.add_active_download(
+                    download_id=download_id,
+                    user_id=message.from_user.id,
+                    chat_id=message.chat.id,
+                    url=link,
+                    format_id="audio",
+                    file_path=audio_path
+                )
+                my_thread = threading.Thread(target=download_audio_with_cancel, args=(link, audio_path, message.chat.id, thumbnail_path, bot_username, message.from_user.id, str(message.chat.id), download_id))
                 my_thread.start()
+                # Отправляем сообщение о начале загрузки
+                send_download_started_message(message.chat.id, download_id, link)
                 return
             elif domain.find("youtu") > -1:
                 formats = info_dict.get('formats', [])
@@ -325,9 +392,22 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
             else:
                 if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1:
                     db.set_work(message.from_user.id, 1)
-                    await message.answer("Download started")
-                    my_thread = threading.Thread(target=simple_downloader, args=(link, video_path, message.chat.id, domain, None, title_orig, None, None, message.from_user.id, str(message.chat.id)))
+                    # Сообщение о начале загрузки будет отправлено через send_download_started_message
+                    # Генерируем ID для загрузки
+                    download_id = generate_download_id(message.from_user.id)
+                    # Сохраняем информацию о загрузке в БД
+                    db.add_active_download(
+                        download_id=download_id,
+                        user_id=message.from_user.id,
+                        chat_id=message.chat.id,
+                        url=link,
+                        format_id=None,
+                        file_path=video_path
+                    )
+                    my_thread = threading.Thread(target=simple_downloader_with_cancel, args=(link, video_path, message.chat.id, domain, None, title_orig, None, message.from_user.id, str(message.chat.id), download_id))
                     my_thread.start()
+                    # Отправляем сообщение о начале загрузки
+                    send_download_started_message(message.chat.id, download_id, link)
                 else:
                     await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
         else:
@@ -498,13 +578,27 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
         ytlog = ''
         pass
 
-    bot_info = await query.bot.get_me()
+        bot_info = await query.bot.get_me()
     bot_username = bot_info.username
     token = 'dl_' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    
+    # Сохраняем полную информацию о видео в deeplink
+    video_info = {
+        'link': link,
+        'domain': domain,
+        'title': title,
+        'thumbnail_url': thumb_url
+    }
+    
     try:
-        db.add_deeplink(token, link)
+        db.add_deeplink(token, json.dumps(video_info))
     except Exception:
-        pass
+        # Fallback: сохраняем только ссылку
+        try:
+            db.add_deeplink(token, link)
+        except Exception:
+            pass
+    
     deeplink = f"https://t.me/{bot_username}?start={token}"
     pm_kb = AioInlineKeyboardMarkup(inline_keyboard=[[AioInlineKeyboardButton(text='Open bot to download', url=deeplink)]])
 
@@ -602,8 +696,100 @@ async def ban_user(call: CallbackQuery):
         except Exception:
             pass
 
+
+async def cancel_download_command(message: Message, state: FSMContext):
+    """Обработчик команды /cancel - показывает список активных загрузок."""
+    user_id = message.from_user.id
+    
+    # Получаем активные загрузки пользователя
+    active_downloads = db.get_active_downloads(user_id)
+    
+    if not active_downloads:
+        await message.answer("У вас нет активных загрузок для отмены.")
+        return
+    
+    # Создаем клавиатуру с активными загрузками
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram import types
+    
+    keyboard_builder = InlineKeyboardBuilder()
+    
+    for i, (download_id, url, format_id, started_at) in enumerate(active_downloads, 1):
+        # Форматируем время
+        from datetime import datetime
+        time_str = datetime.fromtimestamp(started_at).strftime('%H:%M:%S')
+        
+        # Создаем короткое описание
+        url_short = url[:30] + '...' if len(url) > 30 else url
+        button_text = f"{i}. {url_short} ({time_str})"
+        
+        keyboard_builder.button(
+            text=button_text,
+            callback_data=f"cancel_download:{download_id}"
+        )
+    
+    keyboard_builder.adjust(1)
+    
+    await message.answer(
+        "Выберите загрузку для отмены:",
+        reply_markup=keyboard_builder.as_markup()
+    )
+
+
+async def cancel_download_callback(call: CallbackQuery, state: FSMContext):
+    """Обработчик нажатия на кнопку отмены загрузки."""
+    try:
+        # Извлекаем download_id из callback_data
+        _, download_id = call.data.split(":", 1)
+        
+        # Получаем информацию о загрузке
+        download_info = db.get_download_by_id(download_id)
+        if not download_info:
+            await call.answer("Загрузка не найдена или уже завершена.", show_alert=True)
+            return
+        
+        # Проверяем, что пользователь отменяет свою загрузку
+        user_id = call.from_user.id
+        if download_info[1] != user_id:  # user_id field
+            await call.answer("Вы не можете отменить чужую загрузку.", show_alert=True)
+            return
+        
+        # Пытаемся отменить загрузку
+        success, message = cancel_download_process(download_id)
+        
+        if success:
+            # Обновляем сообщение
+            if call.message:
+                try:
+                    await call.message.edit_text(
+                        f"✅ {message}\n\nЗагрузка отменена.",
+                        reply_markup=None
+                    )
+                except Exception:
+                    await call.message.answer(f"✅ {message}\n\nЗагрузка отменена.")
+            else:
+                await call.answer(f"✅ {message}", show_alert=True)
+            
+            # Сбрасываем work статус пользователя
+            db.set_work(user_id, 0)
+        else:
+            if call.message:
+                await call.message.answer(f"❌ Не удалось отменить загрузку: {message}")
+            else:
+                await call.answer(f"❌ Не удалось отменить загрузку: {message}", show_alert=True)
+        
+    except Exception as e:
+        print(f"Error in cancel_download_callback: {e}")
+        try:
+            await call.answer("Произошла ошибка при отмене загрузки.", show_alert=True)
+        except Exception:
+            pass
+
+
 async def main():
     db.reset_work()
+    # Очищаем старые записи о загрузках (старше 24 часов)
+    db.cleanup_old_downloads(24)
     clear_downloads()
     # Ensure dlp folder has the two latest yt-dlp releases before bot starts
     try:
@@ -618,12 +804,14 @@ async def main():
 
     dp.message.register(welcome, Command(commands="start"))
     dp.message.register(start_mail, Command(commands="mail"))
+    dp.message.register(cancel_download_command, Command(commands="cancel"))
     dp.message.register(confirm_mail, CatchMessageState.message)
     dp.callback_query.register(mailer, F.data.startswith("mailer"))
     dp.callback_query.register(youtube_download, F.data.startswith("youtube_download"))
     # Payment handlers removed
     dp.callback_query.register(check_subscription, F.data == "check_subscription")
     dp.callback_query.register(ban_user, F.data.startswith("ban:"))
+    dp.callback_query.register(cancel_download_callback, F.data.startswith("cancel_download:"))
     dp.inline_query.register(inline_query_handler)
     dp.message.register(all)
 

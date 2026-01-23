@@ -34,6 +34,20 @@ class DataBase:
                     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
                 );
             ''')
+            # Новая таблица для отслеживания активных загрузок
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS active_downloads (
+                    download_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    format_id TEXT,
+                    process_pid INTEGER,
+                    file_path TEXT,
+                    started_at INTEGER DEFAULT (strftime('%s','now')),
+                    status TEXT DEFAULT 'downloading' -- 'downloading', 'completed', 'cancelled', 'failed'
+                );
+            ''')
             conn.commit()
             conn.close()
         except sqlite3.Error as e:
@@ -89,10 +103,64 @@ class DataBase:
         )
         return row[0] if row else None
 
-    def delete_deeplink(self, token: str):
+        def delete_deeplink(self, token: str):
+            self.insert_delete_request(
+                "DELETE FROM deeplinks WHERE token = ?",
+                (token,)
+            )
+
+    # active downloads management
+    def add_active_download(self, download_id: str, user_id: int, chat_id: int, url: str, 
+                           format_id: str = None, process_pid: int = None, file_path: str = None):
         self.insert_delete_request(
-            "DELETE FROM deeplinks WHERE token = ?",
-            (token,)
+            """INSERT INTO active_downloads 
+               (download_id, user_id, chat_id, url, format_id, process_pid, file_path, status) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'downloading')""",
+            (download_id, user_id, chat_id, url, format_id, process_pid, file_path)
+        )
+
+    def get_active_downloads(self, user_id: int):
+        return self.select_request(
+            "SELECT download_id, url, format_id, started_at FROM active_downloads WHERE user_id = ? AND status = 'downloading' ORDER BY started_at DESC",
+            (user_id,)
+        )
+
+    def get_download_by_id(self, download_id: str):
+        return self.select_request(
+            "SELECT download_id, user_id, chat_id, url, format_id, process_pid, file_path, status FROM active_downloads WHERE download_id = ?",
+            (download_id,), one=True
+        )
+
+    def get_download_pid(self, download_id: str):
+        row = self.select_request(
+            "SELECT process_pid FROM active_downloads WHERE download_id = ?",
+            (download_id,), one=True
+        )
+        return row[0] if row else None
+
+    def update_download_status(self, download_id: str, status: str):
+        self.insert_delete_request(
+            "UPDATE active_downloads SET status = ? WHERE download_id = ?",
+            (status, download_id)
+        )
+
+    def update_download_pid(self, download_id: str, process_pid: int):
+        self.insert_delete_request(
+            "UPDATE active_downloads SET process_pid = ? WHERE download_id = ?",
+            (process_pid, download_id)
+        )
+
+    def remove_active_download(self, download_id: str):
+        self.insert_delete_request(
+            "DELETE FROM active_downloads WHERE download_id = ?",
+            (download_id,)
+        )
+
+    def cleanup_old_downloads(self, hours_old: int = 24):
+        """Удаляет старые записи о загрузках (старше указанного количества часов)"""
+        self.insert_delete_request(
+            "DELETE FROM active_downloads WHERE started_at < strftime('%s','now') - ? * 3600",
+            (hours_old,)
         )
 
     # Структура для выполнения select запросов
