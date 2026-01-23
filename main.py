@@ -244,9 +244,9 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         except Exception as e:
             print(f"Failed to send download started message: {e}")
     else:
-        # В inline-режиме просто отвечаем callback
+        # In inline mode just answer callback
         try:
-            await call.answer("Загрузка начата...")
+            await call.answer("Download started...")
         except:
             pass
 
@@ -700,14 +700,14 @@ async def ban_user(call: CallbackQuery):
 
 
 async def cancel_download_command(message: Message, state: FSMContext):
-    """Обработчик команды /cancel - показывает список активных загрузок."""
+    """Handle /cancel command: show active downloads available for cancel."""
     user_id = message.from_user.id
     
     # Получаем активные загрузки пользователя
     active_downloads = db.get_active_downloads(user_id)
     
     if not active_downloads:
-        await message.answer("У вас нет активных загрузок для отмены.")
+        await message.answer("You have no active downloads to cancel.")
         return
     
     # Создаем клавиатуру с активными загрузками
@@ -733,13 +733,13 @@ async def cancel_download_command(message: Message, state: FSMContext):
     keyboard_builder.adjust(1)
     
     await message.answer(
-        "Выберите загрузку для отмены:",
+        "Select a download to cancel:",
         reply_markup=keyboard_builder.as_markup()
     )
 
 
 async def cancel_download_callback(call: CallbackQuery, state: FSMContext):
-    """Обработчик нажатия на кнопку отмены загрузки."""
+    """Handle cancel-download button click."""
     try:
         # Извлекаем download_id из callback_data
         _, download_id = call.data.split(":", 1)
@@ -747,13 +747,13 @@ async def cancel_download_callback(call: CallbackQuery, state: FSMContext):
         # Получаем информацию о загрузке
         download_info = db.get_download_by_id(download_id)
         if not download_info:
-            await call.answer("Загрузка не найдена или уже завершена.", show_alert=True)
+            await call.answer("Download not found or already finished.", show_alert=True)
             return
         
         # Проверяем, что пользователь отменяет свою загрузку
         user_id = call.from_user.id
         if download_info[1] != user_id:  # user_id field
-            await call.answer("Вы не можете отменить чужую загрузку.", show_alert=True)
+            await call.answer("You cannot cancel someone else's download.", show_alert=True)
             return
         
         # Пытаемся отменить загрузку
@@ -764,11 +764,11 @@ async def cancel_download_callback(call: CallbackQuery, state: FSMContext):
             if call.message:
                 try:
                     await call.message.edit_text(
-                        f"✅ {message}\n\nЗагрузка отменена.",
+                        f"✅ {message}\n\nDownload canceled.",
                         reply_markup=None
                     )
                 except Exception:
-                    await call.message.answer(f"✅ {message}\n\nЗагрузка отменена.")
+                    await call.message.answer(f"✅ {message}\n\nDownload canceled.")
             else:
                 await call.answer(f"✅ {message}", show_alert=True)
             
@@ -776,14 +776,14 @@ async def cancel_download_callback(call: CallbackQuery, state: FSMContext):
             db.set_work(user_id, 0)
         else:
             if call.message:
-                await call.message.answer(f"❌ Не удалось отменить загрузку: {message}")
+                await call.message.answer(f"❌ Failed to cancel download: {message}")
             else:
-                await call.answer(f"❌ Не удалось отменить загрузку: {message}", show_alert=True)
+                await call.answer(f"❌ Failed to cancel download: {message}", show_alert=True)
         
     except Exception as e:
         print(f"Error in cancel_download_callback: {e}")
         try:
-            await call.answer("Произошла ошибка при отмене загрузки.", show_alert=True)
+            await call.answer("An error occurred while canceling the download.", show_alert=True)
         except Exception:
             pass
 
