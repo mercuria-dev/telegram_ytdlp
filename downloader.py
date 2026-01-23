@@ -2,6 +2,9 @@
 import os
 import subprocess
 import shutil
+import signal
+import random
+import threading
 from pyrogram import Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import config
@@ -10,6 +13,7 @@ import re
 import time
 from modules.database import DataBase
 from modules import dlp_manager
+
 import shlex
 from PIL import Image
 import json
@@ -71,6 +75,8 @@ def _yt_dlp_runtime_args() -> list[str]:
 
 
 def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: bool = False):
+    """Запускает yt-dlp процесс и возвращает результат.
+    Для совместимости с существующим кодом."""
     # Prefer selected executable from dlp_manager (dlp/ folder). Falls back to system `yt-dlp`.
     exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
     cmd = [exe] + args_list
@@ -87,6 +93,128 @@ def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: b
     if proc.returncode != 0:
         raise RuntimeError(f"yt-dlp exited with code {proc.returncode}")
     return None
+
+
+def run_yt_dlp_process_with_pid(args_list, download_id: str = None):
+    """Запускает yt-dlp процесс и возвращает объект Popen с PID.
+    Используется для загрузок, которые могут быть отменены."""
+    exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
+    cmd = [exe] + args_list
+    
+    # Запускаем процесс с выводом в консоль
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    
+    # Сохраняем PID в базу данных, если передан download_id
+    if download_id and proc.pid:
+        try:
+            db.update_download_pid(download_id, proc.pid)
+        except Exception as e:
+            print(f"Failed to save PID for download {download_id}: {e}")
+    
+    return proc
+
+
+def cancel_download_process(download_id: str):
+    """Отменяет загрузку по её ID."""
+    try:
+        # Получаем PID из базы данных
+        pid = db.get_download_pid(download_id)
+        if not pid:
+            return False, "PID not found"
+        
+        # Пытаемся завершить процесс
+        try:
+            if os.name == 'nt':  # Windows
+                # В Windows используем taskkill для принудительного завершения
+                try:
+                    # Сначала пробуем нормально завершить
+                    subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], 
+                                 capture_output=True, timeout=5)
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    # Если taskkill не сработал, пробуем os.kill
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except PermissionError:
+                        # Если нет прав, пробуем через taskkill без /F
+                        try:
+                            subprocess.run(['taskkill', '/PID', str(pid), '/T'], 
+                                         capture_output=True, timeout=5)
+                        except:
+                            return False, "No permission to terminate process"
+            else:  # Unix/Linux
+                os.kill(pid, signal.SIGKILL)
+            
+            # Ждем завершения процесса
+            time.sleep(2)
+            
+            # Обновляем статус в базе данных
+            db.update_download_status(download_id, "cancelled")
+            
+            return True, "Download cancelled successfully"
+        except ProcessLookupError:
+            # Процесс уже завершен
+            db.update_download_status(download_id, "cancelled")
+            return True, "Process already terminated"
+        except Exception as e:
+            return False, f"Failed to cancel process: {str(e)}"
+            
+    except Exception as e:
+        return False, f"Error cancelling download: {str(e)}"
+
+
+def generate_download_id(user_id: int) -> str:
+    """Генерирует уникальный ID для загрузки."""
+    timestamp = int(time.time())
+    random_suffix = random.randint(1000, 9999)
+    return f"{user_id}_{timestamp}_{random_suffix}"
+
+
+def send_download_started_message(chat_id: int, download_id: str, url: str):
+    """Отправляет сообщение о начале загрузки с кнопкой отмены."""
+    try:
+        # Создаем клавиатуру в формате Telegram Bot API
+        keyboard = {
+            "inline_keyboard": [
+                [{
+                    "text": "❌ Отменить загрузку",
+                    "callback_data": f"cancel_download:{download_id}"
+                }]
+            ]
+        }
+        
+        # Отправляем сообщение через Bot API
+        url_api = f"https://api.telegram.org/bot{config.bot_token}/sendMessage"
+        data = {
+            'chat_id': str(chat_id),
+            'text': f"🚀 Начинаю загрузку...\n\nСсылка: {url[:100]}...\n\nВы можете отменить загрузку, если ошиблись с выбором.",
+            'reply_markup': json.dumps(keyboard),
+            'disable_web_page_preview': 'true'
+        }
+        
+        resp = requests.post(url_api, data=data, timeout=30)
+        if resp.status_code == 200 and resp.json().get('ok'):
+            return resp.json()['result']['message_id']
+        return None
+    except Exception as e:
+        print(f"Failed to send download started message: {e}")
+        return None
+
+
+def update_download_message(chat_id: int, message_id: int, text: str):
+    """Обновляет сообщение о загрузке."""
+    try:
+        url_api = f"https://api.telegram.org/bot{config.bot_token}/editMessageText"
+        data = {
+            'chat_id': str(chat_id),
+            'message_id': message_id,
+            'text': text,
+            'disable_web_page_preview': 'true'
+        }
+        
+        resp = requests.post(url_api, data=data, timeout=30)
+        return resp.status_code == 200 and resp.json().get('ok')
+    except Exception:
+        return False
 
 
 def get_info_json(url, cookiefile=None):
@@ -353,58 +481,79 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
 
 def get_video_formats(url, domain):
     ck = select_cookiefile(url or domain)
+    info = {}
+    err = ''
+    
+    # Пробуем с cookies если есть
+    if ck:
+        try:
+            args = ["--dump-single-json", "--no-warnings", "--no-progress", "--cookies", ck]
+            args += _yt_dlp_runtime_args()
+            if _is_youtube(url or domain):
+                args += _youtube_extractor_args()
+            args += [url]
+            out, err = run_yt_dlp_process(args, capture_output=True, return_stderr=True)
+            try:
+                info = json.loads(out)
+                if info and info.get('title'):
+                    # Все равно запускаем --list-formats для логов в консоль
+                    _run_list_formats_for_logs(url, domain, ck)
+                    return info, err
+            except Exception:
+                info = {}
+        except Exception as e:
+            err = str(e)
+            info = {}
+    
+    # Если с cookies не получилось, пробуем без них
     try:
-        # capture stderr/logs as well so caller can display them
         args = ["--dump-single-json", "--no-warnings", "--no-progress"]
-        if ck:
-            args = ["--cookies", ck] + args
         args += _yt_dlp_runtime_args()
         if _is_youtube(url or domain):
             args += _youtube_extractor_args()
         args += [url]
-        out, err = run_yt_dlp_process(args, capture_output=True, return_stderr=True)
+        out, err2 = run_yt_dlp_process(args, capture_output=True, return_stderr=True)
         try:
             info = json.loads(out)
+            err = err + '\n' + err2 if err else err2
         except Exception:
             info = {}
+    except Exception as e:
+        err = err + '\n' + str(e) if err else str(e)
+        info = {}
+    
+    # Запускаем --list-formats для логов в консоль
+    _run_list_formats_for_logs(url, domain, ck)
+    
+    return info, (err or '')
 
-        # Always run a streaming `--list-formats` so formats appear in console in real time.
-        try:
-            lf_args = ["--list-formats"]
-            if ck:
-                lf_args = ["--cookies", ck] + lf_args
-            lf_args += _yt_dlp_runtime_args()
-            if _is_youtube(url or domain):
-                lf_args += _youtube_extractor_args()
-            lf_args += [url]
-            try:
-                exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
-                cmd = [exe] + lf_args
-                # Stream combined stdout/stderr line-by-line to console and collect it
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                list_out_lines = []
-                if proc.stdout is not None:
-                    for line in proc.stdout:
-                        try:
-                            print(line.rstrip())
-                        except Exception:
-                            pass
-                        try:
-                            list_out_lines.append(line.rstrip())
-                        except Exception:
-                            pass
-                proc.wait()
-                if list_out_lines:
-                    err = (err or '') + '\n' + '\n'.join(list_out_lines)
-            except Exception:
-                # ignore streaming errors
-                pass
-        except Exception:
-            pass
 
-        return info, (err or '')
+def _run_list_formats_for_logs(url, domain, ck=None):
+    """Запускает yt-dlp --list-formats для вывода логов в консоль."""
+    try:
+        lf_args = ["--list-formats"]
+        if ck:
+            lf_args = ["--cookies", ck] + lf_args
+        lf_args += _yt_dlp_runtime_args()
+        if _is_youtube(url or domain):
+            lf_args += _youtube_extractor_args()
+        lf_args += [url]
+        
+        exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
+        cmd = [exe] + lf_args
+        
+        # Stream combined stdout/stderr line-by-line to console
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                try:
+                    print(line.rstrip())
+                except Exception:
+                    pass
+        proc.wait()
     except Exception:
-        return {}, ''
+        # ignore streaming errors
+        pass
 
 def is_youtube_public(url: str) -> bool:
     try:
@@ -485,6 +634,259 @@ def ensure_jpg_thumb(thumb_path, video_path, out_base):
     except Exception:
         pass
     return None
+
+
+def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_format=None, title_orig="", thumb=None, 
+                                 user_id_for_work=None, session_id=None, download_id: str = None):
+    """Улучшенная версия simple_downloader с поддержкой отмены."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # ID сообщения о начале загрузки (уже отправлено в main.py)
+    start_message_id = None
+    
+    try:
+        ydl_opts = {
+            'format': 'best',
+            'outtmpl': output_path,
+            'noprogress': True,
+            'quiet': True
+        }
+        ck_all = select_cookiefile(url or domain)
+        if ck_all:
+            ydl_opts['cookiefile'] = ck_all
+        if domain == "instagram.com":
+            ydl_opts['quiet'] = True
+        elif domain.startswith("youtu"):
+            try:
+                ck = select_cookiefile(url)
+                try:
+                    info = get_info_json(url, ck)
+                except Exception:
+                    info = {}
+            except Exception:
+                info = {}
+            fmts = info.get('formats', []) if isinstance(info, dict) else []
+            selected = None
+            for f in fmts:
+                if str(f.get('format_id')) == str(video_format):
+                    selected = f
+                    break
+
+            # Если есть набор форматов с разными языками для одного и того же качества,
+            # и среди них есть вариант с меткой (original), то для этого качества
+            # всегда берём именно (original), независимо от того, на какой язык нажал пользователь.
+            try:
+                if isinstance(selected, dict) and fmts:
+                    sel_height = selected.get('height')
+                    sel_fps = selected.get('fps')
+                    # Посчитаем, сколько языков есть для этого качества
+                    same_quality = []
+                    for fm in fmts:
+                        if fm.get('vcodec') == 'images':
+                            continue
+                        if sel_height is not None and fm.get('height') != sel_height:
+                            continue
+                        if sel_fps is not None and fm.get('fps') != sel_fps:
+                            continue
+                        same_quality.append(fm)
+                    if len(same_quality) > 1:
+                        # Есть несколько языков -> ищем (original)
+                        original_fmt = None
+                        for fm in same_quality:
+                            note = (fm.get('format_note') or '').lower()
+                            # yt-dlp обычно пишет "[en-US] (original)" в конце MORE INFO
+                            if '(original)' in note or '[en-us] (original)' in note:
+                                original_fmt = fm
+                                break
+                        if original_fmt is not None:
+                            selected = original_fmt
+                            video_format = selected.get('format_id', video_format)
+            except Exception:
+                pass
+
+            if selected and selected.get('acodec') and selected.get('acodec') != 'none':
+                ydl_opts['format'] = str(video_format)
+            else:
+                ydl_opts['format'] = f"{video_format}+bestaudio/best"
+                ydl_opts['merge_output_format'] = "mp4"
+            
+        # Build args for yt-dlp CLI
+        args = []
+        if ydl_opts.get('format'):
+            args += ['-f', ydl_opts['format']]
+        if ydl_opts.get('outtmpl'):
+            args += ['-o', ydl_opts['outtmpl']]
+        if ydl_opts.get('merge_output_format'):
+            args += ['--merge-output-format', ydl_opts['merge_output_format']]
+        if ck_all:
+            args = ['--cookies', ck_all] + args
+        args += _yt_dlp_runtime_args()
+        if domain and domain.startswith('youtu'):
+            args += _youtube_extractor_args()
+
+        # Запускаем процесс с возможностью отмены
+        proc = run_yt_dlp_process_with_pid(args + [url], download_id)
+        
+        # Читаем вывод процесса
+        output_lines = []
+        if proc.stdout:
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    print(line)
+                    output_lines.append(line)
+        
+        # Ждем завершения процесса
+        proc.wait()
+        
+        # Проверяем статус загрузки в БД
+        if download_id:
+            download_info = db.get_download_by_id(download_id)
+            if download_info and download_info[7] == 'cancelled':  # status field
+                # Загрузка была отменена
+                if start_message_id:
+                    update_download_message(chat_id, start_message_id, "❌ Загрузка отменена пользователем.")
+                db.set_work(user_id_for_work or chat_id, 0)
+                delete_file(output_path)
+                return
+        
+        if proc.returncode != 0:
+            error_msg = f"yt-dlp exited with code {proc.returncode}"
+            if output_lines:
+                error_msg += f"\nLast output: {output_lines[-1] if output_lines else 'No output'}"
+            
+            if start_message_id:
+                update_download_message(chat_id, start_message_id, f"❌ Ошибка загрузки: {error_msg}")
+            else:
+                bot_api_send_message(chat_id, f"Download failed: {error_msg}")
+            
+            db.set_work(user_id_for_work or chat_id, 0)
+            delete_file(output_path)
+            return
+
+        # Обновляем сообщение о успешной загрузке
+        if start_message_id:
+            update_download_message(chat_id, start_message_id, "✅ Загрузка завершена. Отправляю файл...")
+
+        try:
+            ck = select_cookiefile(url)
+            try:
+                info_dict = get_info_json(url, ck)
+            except Exception:
+                info_dict = {}
+        except Exception:
+            info_dict = {}
+
+        width = 0
+        height = 0
+        fs = info_dict.get('formats', [])
+        for f in fs:
+            if f.get('format_id') == video_format:
+                width = f.get('width', 0) or 0
+                height = f.get('height', 0) or 0
+
+        base_name = os.path.splitext(os.path.basename(output_path))[0]
+        safe_base = sanitize_filename(base_name)
+        norm_thumb = ensure_jpg_thumb(thumb, output_path, safe_base)
+
+        # Try Bot API upload for files <= 50MB, else fallback to Pyrogram
+        try:
+            size_bytes = os.path.getsize(output_path)
+        except Exception:
+            size_bytes = 0
+
+        if size_bytes and size_bytes <= 50 * 1024 * 1024:
+            try:
+                api_url = f"https://api.telegram.org/bot{config.bot_token}/sendVideo"
+                data = {
+                    'chat_id': str(chat_id),
+                    'caption': title_orig or safe_base,
+                    'supports_streaming': 'true',
+                }
+                with open(output_path, 'rb') as vf:
+                    files = {
+                        'video': (os.path.basename(output_path), vf)
+                    }
+                    if norm_thumb and os.path.exists(norm_thumb):
+                        with open(norm_thumb, 'rb') as tf:
+                            files['thumbnail'] = (os.path.basename(norm_thumb), tf)
+                            resp = requests.post(api_url, data=data, files=files, timeout=120)
+                    else:
+                        resp = requests.post(api_url, data=data, files=files, timeout=120)
+                if resp.status_code != 200 or not resp.json().get('ok', False):
+                    raise RuntimeError(f"Bot API sendVideo failed: HTTP {resp.status_code} {resp.text[:200]}")
+            except Exception as e:
+                # Fallback to Pyrogram if Bot API fails
+                try:
+                    session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                    app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                    app.start()
+                    if norm_thumb and os.path.exists(norm_thumb):
+                        app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+                    else:
+                        app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+                    app.stop()
+                    delete_pyrogram_session_files(session_base)
+                except Exception as e2:
+                    print(f"Failed to send video (both Bot API and Pyrogram): {e} | {e2}")
+                    bot_api_send_message(chat_id, f"Send failed: {e2}")
+        else:
+            session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+            app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+            app.start()
+            try:
+                if norm_thumb and os.path.exists(norm_thumb):
+                    app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=norm_thumb, width=width, height=height)
+                else:
+                    app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
+            except Exception as e:
+                print(f"Failed to send video: {e}")
+                bot_api_send_message(chat_id, f"Send failed: {e}")
+            app.stop()
+            delete_pyrogram_session_files(session_base)
+            
+    except Exception as e:
+        try:
+            if domain in ["instagram.com", "twitter.com", "x.com"]:
+                output_path = output_path.replace("mp4", "jpg")
+                command = [
+                    "gallery-dl",
+                    "--config", "gallery-dl.conf",
+                    "--filename", output_path.replace("downloads/", ""),
+                    "--directory", "downloads/",
+                    url
+                ]
+                subprocess.run(command)
+                # Try Bot API sendPhoto first
+                try:
+                    api = f"https://api.telegram.org/bot{config.bot_token}/sendPhoto"
+                    with open(output_path, 'rb') as pf:
+                        files = {'photo': (os.path.basename(output_path), pf)}
+                        data = {'chat_id': str(chat_id)}
+                        r = requests.post(api, data=data, files=files, timeout=120)
+                        ok = (r.status_code == 200 and r.json().get('ok'))
+                    if not ok:
+                        raise RuntimeError(r.text[:200])
+                except Exception:
+                    session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                    app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                    app.start()
+                    app.send_photo(chat_id=chat_id, photo=output_path)
+                    app.stop()
+                    delete_pyrogram_session_files(session_base)
+        except Exception:
+            # Prefer Bot API error notification
+            bot_api_send_message(chat_id, f"Download error: {e}")
+    finally:
+        # Обновляем статус в БД
+        if download_id:
+            db.update_download_status(download_id, "completed")
+            db.remove_active_download(download_id)
+        
+        db.set_work(user_id_for_work or chat_id, 0)
+        delete_file(output_path)
+
 
 def simple_downloader(url, output_path, chat_id, domain, video_format=None, title_orig="", thumb=None, payment_payload=None, user_id_for_work=None, session_id=None):
     loop = asyncio.new_event_loop()
@@ -723,6 +1125,198 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             bot_api_send_message(chat_id, f"Download error: {e}")
     db.set_work(user_id_for_work or chat_id, 0)
     delete_file(output_path)
+
+
+def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_username, 
+                              user_id_for_work=None, session_id=None, download_id: str = None):
+    """Улучшенная версия download_audio с поддержкой отмены."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # ID сообщения о начале загрузки (уже отправлено в main.py)
+    start_message_id = None
+    
+    try:
+        if not output_path.lower().endswith('.mp3'):
+            output_path = output_path + '.mp3'
+
+        base_name = os.path.basename(output_path)
+        base_no_ext = os.path.splitext(base_name)[0]
+        safe_base = sanitize_filename(base_no_ext)
+        outtmpl = os.path.join('downloads', safe_base)
+
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': outtmpl,
+            'writethumbnail': True,
+            'noprogress': True,
+            'quiet': True,
+        }
+
+        ck = select_cookiefile(video_url)
+
+        # Build base args
+        args = []
+        if ydl_opts.get('format'):
+            args += ['-f', ydl_opts['format']]
+        if ydl_opts.get('outtmpl'):
+            args += ['-o', ydl_opts['outtmpl']]
+        if ydl_opts.get('writethumbnail'):
+            args += ['--write-thumbnail']
+        # extract audio to mp3, embed thumbnail, add metadata
+        args += ['--extract-audio', '--audio-format', 'mp3', '--audio-quality', '128', '--embed-thumbnail', '--add-metadata']
+        if ck:
+            args = ['--cookies', ck] + args
+        args += _yt_dlp_runtime_args()
+        if _is_youtube(video_url):
+            args += _youtube_extractor_args()
+
+        # Запускаем процесс с возможностью отмены
+        proc = run_yt_dlp_process_with_pid(args + [video_url], download_id)
+        
+        # Читаем вывод процесса
+        output_lines = []
+        if proc.stdout:
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    print(line)
+                    output_lines.append(line)
+        
+        # Ждем завершения процесса
+        proc.wait()
+        
+        # Проверяем статус загрузки в БД
+        if download_id:
+            download_info = db.get_download_by_id(download_id)
+            if download_info and download_info[7] == 'cancelled':  # status field
+                # Загрузка была отменена
+                if start_message_id:
+                    update_download_message(chat_id, start_message_id, "❌ Загрузка отменена пользователем.")
+                db.set_work(user_id_for_work or chat_id, 0)
+                delete_file(output_path)
+                return
+        
+        if proc.returncode != 0:
+            error_msg = f"yt-dlp exited with code {proc.returncode}"
+            if output_lines:
+                error_msg += f"\nLast output: {output_lines[-1] if output_lines else 'No output'}"
+            
+            if start_message_id:
+                update_download_message(chat_id, start_message_id, f"❌ Ошибка загрузки: {error_msg}")
+            else:
+                bot_api_send_message(chat_id, f"Download failed: {error_msg}")
+            
+            db.set_work(user_id_for_work or chat_id, 0)
+            delete_file(output_path)
+            return
+
+        # Обновляем сообщение о успешной загрузке
+        if start_message_id:
+            update_download_message(chat_id, start_message_id, "✅ Загрузка завершена. Отправляю файл...")
+
+        possible_thumb = None
+        for ext in ('.jpg', '.jpeg', '.webp', '.png'):
+            candidate = outtmpl + ext
+            if os.path.exists(candidate):
+                possible_thumb = candidate
+                break
+
+        audio_thumb = None
+        if possible_thumb:
+            audio_thumb = outtmpl + '_audio.jpg'
+            try:
+                crop_to_square(possible_thumb, audio_thumb)
+            except Exception:
+                audio_thumb = possible_thumb
+        else:
+            if thumb and os.path.exists(thumb):
+                audio_thumb = outtmpl + '_audio.jpg'
+                try:
+                    crop_to_square(thumb, audio_thumb)
+                except Exception:
+                    audio_thumb = thumb
+
+        produced_mp3 = outtmpl + '.mp3'
+        # Try Bot API upload for files <= 50MB, else fallback to Pyrogram
+        try:
+            size_bytes = os.path.getsize(produced_mp3)
+        except Exception:
+            size_bytes = 0
+
+        if size_bytes and size_bytes <= 50 * 1024 * 1024:
+            try:
+                url = f"https://api.telegram.org/bot{config.bot_token}/sendAudio"
+                data = {
+                    'chat_id': str(chat_id),
+                    'caption': f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>",
+                    'parse_mode': 'HTML',
+                    'title': safe_base,
+                }
+                with open(produced_mp3, 'rb') as af:
+                    files = {
+                        'audio': (os.path.basename(produced_mp3), af)
+                    }
+                    if audio_thumb and os.path.exists(audio_thumb):
+                        with open(audio_thumb, 'rb') as tf:
+                            files['thumbnail'] = (os.path.basename(audio_thumb), tf)
+                            resp = requests.post(url, data=data, files=files, timeout=120)
+                    else:
+                        resp = requests.post(url, data=data, files=files, timeout=120)
+                if resp.status_code != 200 or not resp.json().get('ok', False):
+                    raise RuntimeError(f"Bot API sendAudio failed: HTTP {resp.status_code} {resp.text[:200]}")
+            except Exception as e:
+                # Fallback to Pyrogram if Bot API fails
+                try:
+                    session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                    app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                    app.start()
+                    app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+                    app.stop()
+                    delete_pyrogram_session_files(session_base)
+                except Exception as e2:
+                    print(f"Failed to send audio (both Bot API and Pyrogram): {e} | {e2}")
+                    bot_api_send_message(chat_id, f"Send failed: {e2}")
+        else:
+            session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+            app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+            app.start()
+            try:
+                app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+            except Exception as e:
+                print(f"Failed to send audio: {e}")
+                bot_api_send_message(chat_id, f"Send failed: {e}")
+            app.stop()
+            delete_pyrogram_session_files(session_base)
+        
+        if audio_thumb and os.path.exists(audio_thumb) and (audio_thumb != produced_mp3):
+            try:
+                delete_file(audio_thumb)
+            except Exception:
+                pass
+                
+    except Exception as e:
+        try:
+            session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+            app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+            app.start()
+            app.send_message(chat_id=chat_id, text=f"Download error: {e}")
+            app.stop()
+            delete_pyrogram_session_files(session_base)
+        except Exception:
+            pass
+    finally:
+        # Обновляем статус в БД
+        if download_id:
+            db.update_download_status(download_id, "completed")
+            db.remove_active_download(download_id)
+        
+        db.set_work(user_id_for_work or chat_id, 0)
+        try:
+            delete_file(output_path)
+        except Exception:
+            pass
+
 
 def delete_pyrogram_session_files(session_base: str):
     return
