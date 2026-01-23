@@ -45,6 +45,8 @@ def is_supported_domain(domain: str | None) -> bool:
         return True
     if ("tiktok" in d) or ("instagram" in d) or ("pinterest" in d):
         return True
+    if ("x.com" in d) or ("twitter.com" in d):
+        return True
     if (d == "vk.com") or ("vkvideo.ru" in d):
         return True
     return False
@@ -323,7 +325,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     await message.answer(caption_text, reply_markup=kb)
                 # yt-dlp logs are printed to server console only (not sent to Telegram)
             else:
-                if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1:
+                if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1 or domain.find("x.com") > -1 or domain.find("twitter.com") > -1:
                     db.set_work(message.from_user.id, 1)
                     await message.answer("Download started")
                     my_thread = threading.Thread(target=simple_downloader, args=(link, video_path, message.chat.id, domain, None, title_orig, None, None, message.from_user.id, str(message.chat.id)))
