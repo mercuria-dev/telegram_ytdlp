@@ -157,13 +157,11 @@ class DataBase:
         )
 
     def cleanup_old_downloads(self, hours_old: int = 24):
-        """Удаляет старые записи о загрузках (старше указанного количества часов)"""
         self.insert_delete_request(
             "DELETE FROM active_downloads WHERE started_at < strftime('%s','now') - ? * 3600",
             (hours_old,)
         )
 
-    # Структура для выполнения select запросов
     def select_request(self, query, params=(), one=False):
         conn = sqlite3.connect(self.database_name)
         cursor = conn.cursor()

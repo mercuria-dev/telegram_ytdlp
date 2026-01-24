@@ -75,8 +75,6 @@ def _yt_dlp_runtime_args() -> list[str]:
 
 
 def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: bool = False):
-    """Запускает yt-dlp процесс и возвращает результат.
-    Для совместимости с существующим кодом."""
     # Prefer selected executable from dlp_manager (dlp/ folder). Falls back to system `yt-dlp`.
     exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
     cmd = [exe] + args_list
@@ -96,8 +94,6 @@ def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: b
 
 
 def run_yt_dlp_process_with_pid(args_list, download_id: str = None):
-    """Запускает yt-dlp процесс и возвращает объект Popen с PID.
-    Используется для загрузок, которые могут быть отменены."""
     exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
     cmd = [exe] + args_list
     
@@ -115,27 +111,20 @@ def run_yt_dlp_process_with_pid(args_list, download_id: str = None):
 
 
 def cancel_download_process(download_id: str):
-    """Отменяет загрузку по её ID."""
     try:
-        # Получаем PID из базы данных
         pid = db.get_download_pid(download_id)
         if not pid:
             return False, "PID not found"
         
-        # Пытаемся завершить процесс
         try:
             if os.name == 'nt':  # Windows
-                # В Windows используем taskkill для принудительного завершения
                 try:
-                    # Сначала пробуем нормально завершить
                     subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], 
                                  capture_output=True, timeout=5)
                 except (subprocess.TimeoutExpired, FileNotFoundError):
-                    # Если taskkill не сработал, пробуем os.kill
                     try:
                         os.kill(pid, signal.SIGTERM)
                     except PermissionError:
-                        # Если нет прав, пробуем через taskkill без /F
                         try:
                             subprocess.run(['taskkill', '/PID', str(pid), '/T'], 
                                          capture_output=True, timeout=5)
@@ -144,15 +133,12 @@ def cancel_download_process(download_id: str):
             else:  # Unix/Linux
                 os.kill(pid, signal.SIGKILL)
             
-            # Ждем завершения процесса
             time.sleep(2)
             
-            # Обновляем статус в базе данных
             db.update_download_status(download_id, "cancelled")
             
             return True, "Download cancelled successfully"
         except ProcessLookupError:
-            # Процесс уже завершен
             db.update_download_status(download_id, "cancelled")
             return True, "Process already terminated"
         except Exception as e:
@@ -163,34 +149,36 @@ def cancel_download_process(download_id: str):
 
 
 def generate_download_id(user_id: int) -> str:
-    """Генерирует уникальный ID для загрузки."""
     timestamp = int(time.time())
     random_suffix = random.randint(1000, 9999)
     return f"{user_id}_{timestamp}_{random_suffix}"
 
 
 def send_download_started_message(chat_id: int, download_id: str, url: str):
-    """Отправляет сообщение о начале загрузки с кнопкой отмены."""
     try:
-        # Создаем клавиатуру в формате Telegram Bot API
+        # Create inline keyboard (Telegram Bot API format)
         keyboard = {
             "inline_keyboard": [
                 [{
-                    "text": "❌ Отменить загрузку",
+                    "text": "❌ Cancel download",
                     "callback_data": f"cancel_download:{download_id}"
                 }]
             ]
         }
-        
-        # Отправляем сообщение через Bot API
+
+        # Send message via Bot API
         url_api = f"https://api.telegram.org/bot{config.bot_token}/sendMessage"
         data = {
-            'chat_id': str(chat_id),
-            'text': f"🚀 Начинаю загрузку...\n\nСсылка: {url[:100]}...\n\nВы можете отменить загрузку, если ошиблись с выбором.",
-            'reply_markup': json.dumps(keyboard),
-            'disable_web_page_preview': 'true'
+            "chat_id": str(chat_id),
+            "text": (
+                "🚀 Starting download...\n\n"
+                f"Link: {url[:100]}...\n\n"
+                "You can cancel the download if you selected the wrong link."
+            ),
+            "reply_markup": json.dumps(keyboard),
+            "disable_web_page_preview": True
         }
-        
+
         resp = requests.post(url_api, data=data, timeout=30)
         if resp.status_code == 200 and resp.json().get('ok'):
             return resp.json()['result']['message_id']
@@ -201,7 +189,6 @@ def send_download_started_message(chat_id: int, download_id: str, url: str):
 
 
 def update_download_message(chat_id: int, message_id: int, text: str):
-    """Обновляет сообщение о загрузке."""
     try:
         url_api = f"https://api.telegram.org/bot{config.bot_token}/editMessageText"
         data = {
@@ -522,14 +509,12 @@ def get_video_formats(url, domain):
         err = err + '\n' + str(e) if err else str(e)
         info = {}
     
-    # Запускаем --list-formats для логов в консоль
     _run_list_formats_for_logs(url, domain, ck)
     
     return info, (err or '')
 
 
 def _run_list_formats_for_logs(url, domain, ck=None):
-    """Запускает yt-dlp --list-formats для вывода логов в консоль."""
     try:
         lf_args = ["--list-formats"]
         if ck:
@@ -638,11 +623,9 @@ def ensure_jpg_thumb(thumb_path, video_path, out_base):
 
 def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_format=None, title_orig="", thumb=None, 
                                  user_id_for_work=None, session_id=None, download_id: str = None):
-    """Улучшенная версия simple_downloader с поддержкой отмены."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # ID сообщения о начале загрузки (уже отправлено в main.py)
     start_message_id = None
     
     try:
@@ -1129,11 +1112,9 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
 
 def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_username, 
                               user_id_for_work=None, session_id=None, download_id: str = None):
-    """Улучшенная версия download_audio с поддержкой отмены."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # ID сообщения о начале загрузки (уже отправлено в main.py)
     start_message_id = None
     
     try:
