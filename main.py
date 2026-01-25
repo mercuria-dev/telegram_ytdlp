@@ -800,6 +800,14 @@ async def main():
         print(f"dlp_manager error: {e}")
     bot_properties = DefaultBotProperties(parse_mode=ParseMode.HTML)
     bot = Bot(token=bot_token, default=bot_properties)
+
+    # Don't process old (pending) updates after bot restarts
+    # Works for polling as well: Telegram will drop queued updates.
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        print(f"Failed to drop pending updates: {e}")
+
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(ExistsUserMiddleware())
     dp.message.middleware(ThrottlingMiddleware())
