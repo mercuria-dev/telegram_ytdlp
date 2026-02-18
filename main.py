@@ -204,6 +204,21 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
     # Генерируем уникальный ID для загрузки
     download_id = generate_download_id(call.from_user.id)
     
+    # Отправляем сообщение о начале загрузки с кнопкой отмены
+    # Только если не в inline-режиме (в inline нельзя отправлять сообщения)
+    message_id = None
+    if call.message:
+        try:
+            message_id = send_download_started_message(target_chat_id, download_id, link)
+        except Exception as e:
+            print(f"Failed to send download started message: {e}")
+    else:
+        # In inline mode just answer callback
+        try:
+            await call.answer("Download started...")
+        except:
+            pass
+
     # Сохраняем информацию о загрузке в БД
     db.add_active_download(
         download_id=download_id,
@@ -211,7 +226,8 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         chat_id=target_chat_id,
         url=link,
         format_id=format if format != "audio" else "audio",
-        file_path=video_path if format != "audio" else f"downloads/{title}.mp3"
+        file_path=video_path if format != "audio" else f"downloads/{title}.mp3",
+        message_id=message_id
     )
 
     if format != "audio":
@@ -234,21 +250,6 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
                   call.from_user.id, sess_id, download_id)
         )
         my_thread.start()
-    
-        # Отправляем сообщение о начале загрузки с кнопкой отмены
-    # Только если не в inline-режиме (в inline нельзя отправлять сообщения)
-    if call.message:
-        try:
-            message_id = send_download_started_message(target_chat_id, download_id, link)
-            # ID сообщения можно сохранить для будущего обновления
-        except Exception as e:
-            print(f"Failed to send download started message: {e}")
-    else:
-        # In inline mode just answer callback
-        try:
-            await call.answer("Download started...")
-        except:
-            pass
 
 async def process_link_message(message: Message, state: FSMContext, link: str):
     try:
@@ -325,6 +326,10 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
 
                 # Генерируем ID для загрузки
                 download_id = generate_download_id(message.from_user.id)
+                
+                # Отправляем сообщение о начале загрузки
+                message_id = send_download_started_message(message.chat.id, download_id, link)
+
                 # Сохраняем информацию о загрузке в БД
                 db.add_active_download(
                     download_id=download_id,
@@ -332,12 +337,11 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     chat_id=message.chat.id,
                     url=link,
                     format_id="audio",
-                    file_path=audio_path
+                    file_path=audio_path,
+                    message_id=message_id
                 )
                 my_thread = threading.Thread(target=download_audio_with_cancel, args=(link, audio_path, message.chat.id, thumbnail_path, bot_username, message.from_user.id, str(message.chat.id), download_id))
                 my_thread.start()
-                # Отправляем сообщение о начале загрузки
-                send_download_started_message(message.chat.id, download_id, link)
                 return
             elif domain.find("youtu") > -1:
                 formats = info_dict.get('formats', [])
@@ -397,6 +401,10 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     # Сообщение о начале загрузки будет отправлено через send_download_started_message
                     # Генерируем ID для загрузки
                     download_id = generate_download_id(message.from_user.id)
+                    
+                    # Отправляем сообщение о начале загрузки
+                    message_id = send_download_started_message(message.chat.id, download_id, link)
+
                     # Сохраняем информацию о загрузке в БД
                     db.add_active_download(
                         download_id=download_id,
@@ -404,12 +412,11 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                         chat_id=message.chat.id,
                         url=link,
                         format_id=None,
-                        file_path=video_path
+                        file_path=video_path,
+                        message_id=message_id
                     )
                     my_thread = threading.Thread(target=simple_downloader_with_cancel, args=(link, video_path, message.chat.id, domain, None, title_orig, None, message.from_user.id, str(message.chat.id), download_id))
                     my_thread.start()
-                    # Отправляем сообщение о начале загрузки
-                    send_download_started_message(message.chat.id, download_id, link)
                 else:
                     await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
         else:

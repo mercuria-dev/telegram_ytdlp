@@ -204,6 +204,19 @@ def update_download_message(chat_id: int, message_id: int, text: str):
         return False
 
 
+def delete_download_message(chat_id: int, message_id: int):
+    try:
+        url_api = f"https://api.telegram.org/bot{config.bot_token}/deleteMessage"
+        data = {
+            'chat_id': str(chat_id),
+            'message_id': message_id
+        }
+        resp = requests.post(url_api, data=data, timeout=30)
+        return resp.status_code == 200 and resp.json().get('ok')
+    except Exception:
+        return False
+
+
 def get_info_json(url, cookiefile=None):
     args = ["--dump-single-json", "--no-warnings", "--no-progress"]
     if cookiefile:
@@ -627,6 +640,13 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
     asyncio.set_event_loop(loop)
     
     start_message_id = None
+    if download_id:
+        try:
+            download_info = db.get_download_by_id(download_id)
+            if download_info and download_info[8]:  # message_id is at index 8
+                start_message_id = download_info[8]
+        except Exception:
+            pass
     
     try:
         ydl_opts = {
@@ -866,6 +886,10 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         if download_id:
             db.update_download_status(download_id, "completed")
             db.remove_active_download(download_id)
+        
+        # Удаляем сообщение "Starting download..."
+        if start_message_id:
+            delete_download_message(chat_id, start_message_id)
         
         db.set_work(user_id_for_work or chat_id, 0)
         delete_file(output_path)
@@ -1116,6 +1140,13 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
     asyncio.set_event_loop(loop)
     
     start_message_id = None
+    if download_id:
+        try:
+            download_info = db.get_download_by_id(download_id)
+            if download_info and download_info[8]:  # message_id is at index 8
+                start_message_id = download_info[8]
+        except Exception:
+            pass
     
     try:
         if not output_path.lower().endswith('.mp3'):
@@ -1291,6 +1322,10 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
         if download_id:
             db.update_download_status(download_id, "completed")
             db.remove_active_download(download_id)
+        
+        # Удаляем сообщение "Starting download..."
+        if start_message_id:
+            delete_download_message(chat_id, start_message_id)
         
         db.set_work(user_id_for_work or chat_id, 0)
         try:

@@ -44,10 +44,16 @@ class DataBase:
                     format_id TEXT,
                     process_pid INTEGER,
                     file_path TEXT,
+                    message_id INTEGER,
                     started_at INTEGER DEFAULT (strftime('%s','now')),
                     status TEXT DEFAULT 'downloading' -- 'downloading', 'completed', 'cancelled', 'failed'
                 );
             ''')
+            # Try to add message_id if it doesn't exist (migration)
+            try:
+                cursor.execute("ALTER TABLE active_downloads ADD COLUMN message_id INTEGER")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
             conn.close()
         except sqlite3.Error as e:
@@ -111,12 +117,12 @@ class DataBase:
 
     # active downloads management
     def add_active_download(self, download_id: str, user_id: int, chat_id: int, url: str, 
-                           format_id: str = None, process_pid: int = None, file_path: str = None):
+                           format_id: str = None, process_pid: int = None, file_path: str = None, message_id: int = None):
         self.insert_delete_request(
             """INSERT INTO active_downloads 
-               (download_id, user_id, chat_id, url, format_id, process_pid, file_path, status) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'downloading')""",
-            (download_id, user_id, chat_id, url, format_id, process_pid, file_path)
+               (download_id, user_id, chat_id, url, format_id, process_pid, file_path, message_id, status) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'downloading')""",
+            (download_id, user_id, chat_id, url, format_id, process_pid, file_path, message_id)
         )
 
     def get_active_downloads(self, user_id: int):
@@ -127,7 +133,7 @@ class DataBase:
 
     def get_download_by_id(self, download_id: str):
         return self.select_request(
-            "SELECT download_id, user_id, chat_id, url, format_id, process_pid, file_path, status FROM active_downloads WHERE download_id = ?",
+            "SELECT download_id, user_id, chat_id, url, format_id, process_pid, file_path, status, message_id FROM active_downloads WHERE download_id = ?",
             (download_id,), one=True
         )
 
@@ -148,6 +154,12 @@ class DataBase:
         self.insert_delete_request(
             "UPDATE active_downloads SET process_pid = ? WHERE download_id = ?",
             (process_pid, download_id)
+        )
+
+    def update_download_message_id(self, download_id: str, message_id: int):
+        self.insert_delete_request(
+            "UPDATE active_downloads SET message_id = ? WHERE download_id = ?",
+            (message_id, download_id)
         )
 
     def remove_active_download(self, download_id: str):
