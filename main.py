@@ -26,11 +26,56 @@ import config
 import string
 import json
 import os
+import html
 from modules import dlp_manager
 from modules import scheduler
 from modules.keyboards import ban_kb
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+# Telegram can reject thumbnails that are not a real photo (e.g. HTML),
+# or images in formats like AVIF/WEBP returned by some CDNs.
+# Normalize to a safe JPEG before uploading.
+def normalize_thumbnail_to_jpeg(path: str, *, max_side: int = 1280) -> bool:
+    try:
+        if not path or not os.path.exists(path):
+            return False
+        if os.path.getsize(path) <= 0:
+            return False
+
+        from PIL import Image
+
+        # Verify file is an image
+        with Image.open(path) as im:
+            im.verify()
+
+        # Re-open for actual processing
+        with Image.open(path) as im:
+            fmt = (im.format or "").upper()
+            w, h = im.size
+            if max(w, h) > max_side:
+                im.thumbnail((max_side, max_side))
+
+            # Convert unsupported/odd formats to JPEG
+            if fmt not in {"JPEG", "JPG", "PNG"}:
+                im = im.convert("RGB")
+                im.save(path, format="JPEG", quality=90, optimize=True)
+            else:
+                # Also ensure mode is compatible
+                if im.mode not in ("RGB", "L"):
+                    im = im.convert("RGB")
+                # If PNG, keep as-is; Telegram accepts it. If something still fails,
+                # the upload path will log the error and fall back to URL/text.
+                if fmt in {"JPEG", "JPG"}:
+                    im.save(path, format="JPEG", quality=90, optimize=True)
+
+        return os.path.exists(path) and os.path.getsize(path) > 0
+    except Exception as e:
+        try:
+            print(f"normalize_thumbnail_to_jpeg failed: {e!r} path={path}")
+        except Exception:
+            pass
+        return False
 
 def looks_like_image_url(url: str | None) -> bool:
     if not url or not isinstance(url, str):
@@ -74,9 +119,28 @@ def is_youtube_playlist_like(url: str) -> bool:
         return False
 
 db = DataBase()
-with open("start.txt", "rt", encoding="utf-8") as start_file:
-    start_msg = start_file.read()
-    start_file.close()
+start_msg = (
+    "<tg-emoji emoji-id=\"5373230968943420212\">⭐</tg-emoji> Good Day!\n"
+    "This is an <a href=\"https://github.com/mercury-devel/telegram_ytdlp\">open-source video downloader</a> on telegram\n"
+    "This bot can download:\n\n"
+    "Photos and videos from Instagram and TikTok.\n"
+    "Videos (with quality selection) and audio (in the best quality) from YouTube.\n"
+    "Music from SoundCloud.\n"
+)
+
+async def send_start_message(message: Message):
+    kb = remove_kb()
+    photo_url = getattr(config, 'start_photo_url', None)
+    if photo_url:
+        try:
+            await message.answer_photo(photo=photo_url, caption=start_msg[:1024], reply_markup=kb)
+            return
+        except Exception as e:
+            try:
+                print(f"Failed to send start photo: {e!r}; url={photo_url}")
+            except Exception:
+                pass
+    await message.answer(start_msg, reply_markup=kb, disable_web_page_preview=True)
 
 async def welcome(message: Message, state: FSMContext):
     parts = (message.text or "").split(maxsplit=1)
@@ -89,7 +153,7 @@ async def welcome(message: Message, state: FSMContext):
         db.delete_deeplink(token)
         await process_link_message(message, state, link)
         return
-    await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+    await send_start_message(message)
 
 async def youtube_download(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -151,10 +215,19 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         # Сохраняем thumbnail если есть URL
         if thumb_url and looks_like_image_url(thumb_url):
             try:
-                response = requests.get(thumb_url, timeout=10)
-                if response.ok and response.content:
+                response = requests.get(
+                    thumb_url,
+                    timeout=10,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    },
+                )
+                ctype = (response.headers.get("Content-Type") or "").lower()
+                if response.ok and response.content and ("image/" in ctype or not ctype):
                     with open(thumbnail_path, 'wb') as file:
                         file.write(response.content)
+                    normalize_thumbnail_to_jpeg(thumbnail_path)
             except Exception:
                 pass
         
@@ -361,11 +434,19 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 thumbnail_path = video_path.replace("mp4", "jpg")
                 if looks_like_image_url(thumbnail_url):
                     try:
-                        resp = requests.get(thumbnail_url, timeout=10)
-                        if resp.ok and resp.content:
+                        resp = requests.get(
+                            thumbnail_url,
+                            timeout=10,
+                            headers={
+                                "User-Agent": "Mozilla/5.0",
+                                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                            },
+                        )
+                        ctype = (resp.headers.get("Content-Type") or "").lower()
+                        if resp.ok and resp.content and ("image/" in ctype or not ctype):
                             with open(thumbnail_path, 'wb') as file:
                                 file.write(resp.content)
-                            thumb_saved = True
+                            thumb_saved = normalize_thumbnail_to_jpeg(thumbnail_path)
                     except Exception:
                         thumb_saved = False
                 title = info_dict.get('title', 'No name')
@@ -382,17 +463,38 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 await state.update_data(premium=premium_mode)
                 # All users are free; show formats without prices
                 kb = youtube_formats_kb(formats, free=True, force_paid=False, price=None)
-                caption_text = title
+                caption_text = "<tg-emoji emoji-id=\"5375309569905938163\">⭐</tg-emoji>"+title
                 # Keep premium notice informational only, no payment requirement
                 if premium_mode:
                     caption_text += "\n\nNote: This video may require cookies due to age or access restrictions."
+
+                # Telegram photo caption limit is 1024 chars
+                caption_for_photo = caption_text[:1024]
+
                 # Send formats keyboard and also show yt-dlp stderr logs (if any)
-                try:
-                    if thumb_saved and os.path.exists(thumbnail_path):
-                        await message.answer_photo(FSInputFile(thumbnail_path), caption_text, reply_markup=kb)
-                    else:
-                        await message.answer(caption_text, reply_markup=kb)
-                except Exception:
+                sent = False
+                if thumb_saved and os.path.exists(thumbnail_path):
+                    try:
+                        await message.answer_photo(photo=FSInputFile(thumbnail_path), caption=caption_for_photo, reply_markup=kb)
+                        sent = True
+                    except Exception as e:
+                        try:
+                            size = os.path.getsize(thumbnail_path) if os.path.exists(thumbnail_path) else -1
+                            print(f"answer_photo local thumb failed: {e!r}; path={thumbnail_path}; size={size}")
+                        except Exception:
+                            pass
+                        sent = False
+                if (not sent) and looks_like_image_url(thumbnail_url):
+                    try:
+                        await message.answer_photo(photo=thumbnail_url, caption=caption_for_photo, reply_markup=kb)
+                        sent = True
+                    except Exception as e:
+                        try:
+                            print(f"answer_photo URL thumb failed: {e!r}; url={thumbnail_url}")
+                        except Exception:
+                            pass
+                        sent = False
+                if not sent:
                     await message.answer(caption_text, reply_markup=kb)
                 # yt-dlp logs are printed to server console only (not sent to Telegram)
             else:
@@ -418,12 +520,12 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     my_thread = threading.Thread(target=simple_downloader_with_cancel, args=(link, video_path, message.chat.id, domain, None, title_orig, None, message.from_user.id, str(message.chat.id), download_id))
                     my_thread.start()
                 else:
-                    await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+                    await send_start_message(message)
         else:
-            await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+            await send_start_message(message)
     except:
         print(traceback.format_exc())
-        await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+        await send_start_message(message)
 
 async def all(message: Message, state: FSMContext):
     # Channel connected to chat events + anonymous users off
@@ -438,14 +540,14 @@ async def all(message: Message, state: FSMContext):
         if not link:
             if chat_type in ("group", "supergroup"):
                 return
-            await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+            await send_start_message(message)
             return
         domain = get_domain(link)
         if not is_supported_domain(domain):
             if chat_type in ("group", "supergroup"):
                 return
             else:
-                await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+                await send_start_message(message)
                 return
         if domain and 'youtu' in domain and is_youtube_playlist_like(link):
             # Ignore playlist/mix; in private chat inform user, in groups stay silent
@@ -456,7 +558,7 @@ async def all(message: Message, state: FSMContext):
         await process_link_message(message, state, link)
     except:
         if getattr(message.chat, 'type', 'private') not in ("group", "supergroup"):
-            await message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+            await send_start_message(message)
 
 
 # Payments removed: no pre-checkout, successful payment, or refund handlers
@@ -471,7 +573,7 @@ async def start_mail(message: Message, state: FSMContext):
 async def confirm_mail(message: Message, state: FSMContext):
     await state.clear()
     if message.text == "/cancel":
-        await message.answer("❌ Denied!")
+        await message.answer(f"{tge('no', '❌')} Denied!")
         return
     txt = message.html_text
     file_id = None
@@ -609,7 +711,9 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
             pass
     
     deeplink = f"https://t.me/{bot_username}?start={token}"
-    pm_kb = AioInlineKeyboardMarkup(inline_keyboard=[[AioInlineKeyboardButton(text='Open bot to download', url=deeplink)]])
+    kb_builder = InlineKeyboardBuilder()
+    kb_builder.row(ikb("Open bot to download", url=deeplink, style="primary"))
+    pm_kb = kb_builder.as_markup()
 
     caption_text = title
     if thumb_url and looks_like_image_url(thumb_url):
@@ -653,7 +757,7 @@ async def check_subscription(call: CallbackQuery):
                     await call.message.delete()
                 except Exception:
                     pass
-                await call.message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+                await send_start_message(call.message)
             else:
                 await call.answer()
             return
@@ -666,7 +770,7 @@ async def check_subscription(call: CallbackQuery):
                     await call.message.delete()
                 except Exception:
                     pass
-                await call.message.answer(start_msg, reply_markup=remove_kb(), disable_web_page_preview=True)
+                await send_start_message(call.message)
             else:
                 await call.answer()
         else:
@@ -732,12 +836,9 @@ async def cancel_download_command(message: Message, state: FSMContext):
         url_short = url[:30] + '...' if len(url) > 30 else url
         button_text = f"{i}. {url_short} ({time_str})"
         
-        keyboard_builder.button(
-            text=button_text,
-            callback_data=f"cancel_download:{download_id}"
+        keyboard_builder.row(
+            cancel_download_btn(download_id, text=button_text)
         )
-    
-    keyboard_builder.adjust(1)
     
     await message.answer(
         "Select a download to cancel:",
@@ -765,32 +866,51 @@ async def cancel_download_callback(call: CallbackQuery, state: FSMContext):
         
         # Пытаемся отменить загрузку
         success, message = cancel_download_process(download_id)
+        safe_msg = html.escape(str(message))
         
         if success:
             # Обновляем сообщение
             if call.message:
                 try:
                     await call.message.edit_text(
-                        f"✅ {message}\n\nDownload canceled.",
+                        f"{tge('check', '✅')} {safe_msg}\n\nDownload canceled.",
                         reply_markup=None
                     )
                 except Exception:
-                    await call.message.answer(f"✅ {message}\n\nDownload canceled.")
+                    await call.message.answer(f"{tge('check', '✅')} {safe_msg}\n\nDownload canceled.")
             else:
-                await call.answer(f"✅ {message}", show_alert=True)
+                await call.answer(f"{tge('check', '✅')} {safe_msg}", show_alert=True)
             
             # Сбрасываем work статус пользователя
             db.set_work(user_id, 0)
         else:
             if call.message:
-                await call.message.answer(f"❌ Failed to cancel download: {message}")
+                await call.message.answer(f"{tge('no', '❌')} Failed to cancel download: {safe_msg}")
             else:
-                await call.answer(f"❌ Failed to cancel download: {message}", show_alert=True)
+                await call.answer(f"{tge('no', '❌')} Failed to cancel download: {safe_msg}", show_alert=True)
         
     except Exception as e:
         print(f"Error in cancel_download_callback: {e}")
         try:
             await call.answer("An error occurred while canceling the download.", show_alert=True)
+        except Exception:
+            pass
+
+
+async def delete_formats_msg_callback(call: CallbackQuery):
+    try:
+        if call.message:
+            try:
+                await call.message.delete()
+            except Exception:
+                pass
+        try:
+            await call.answer()
+        except Exception:
+            pass
+    except Exception:
+        try:
+            await call.answer()
         except Exception:
             pass
 
@@ -829,6 +949,7 @@ async def main():
     dp.callback_query.register(check_subscription, F.data == "check_subscription")
     dp.callback_query.register(ban_user, F.data.startswith("ban:"))
     dp.callback_query.register(cancel_download_callback, F.data.startswith("cancel_download:"))
+    dp.callback_query.register(delete_formats_msg_callback, F.data == "delete_formats_msg")
     dp.inline_query.register(inline_query_handler)
     dp.message.register(all)
 

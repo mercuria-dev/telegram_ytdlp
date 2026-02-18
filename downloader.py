@@ -15,9 +15,11 @@ from modules.database import DataBase
 from modules import dlp_manager
 
 import shlex
+import html
 from PIL import Image
 import json
 import requests
+from modules.keyboards import cancel_download_kb, tge
 
 db = DataBase()
 
@@ -156,26 +158,19 @@ def generate_download_id(user_id: int) -> str:
 
 def send_download_started_message(chat_id: int, download_id: str, url: str):
     try:
-        # Create inline keyboard (Telegram Bot API format)
-        keyboard = {
-            "inline_keyboard": [
-                [{
-                    "text": "❌ Cancel download",
-                    "callback_data": f"cancel_download:{download_id}"
-                }]
-            ]
-        }
+        keyboard = cancel_download_kb(download_id)
 
         # Send message via Bot API
         url_api = f"https://api.telegram.org/bot{config.bot_token}/sendMessage"
         data = {
             "chat_id": str(chat_id),
             "text": (
-                "🚀 Starting download...\n\n"
-                f"Link: {url[:100]}...\n\n"
+                f"{tge('rocket', '🚀')} Starting download...\n\n"
+                f"Link: {html.escape(url[:100])}...\n\n"
                 "You can cancel the download if you selected the wrong link."
             ),
-            "reply_markup": json.dumps(keyboard),
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(keyboard.model_dump(by_alias=True, exclude_none=True)),
             "disable_web_page_preview": True
         }
 
@@ -195,6 +190,7 @@ def update_download_message(chat_id: int, message_id: int, text: str):
             'chat_id': str(chat_id),
             'message_id': message_id,
             'text': text,
+            'parse_mode': 'HTML',
             'disable_web_page_preview': 'true'
         }
         
@@ -404,7 +400,7 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                 url = f"https://api.telegram.org/bot{config.bot_token}/sendAudio"
                 data = {
                     'chat_id': str(chat_id),
-                    'caption': f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>",
+                    'caption': f"{tge('gem', '💎')} <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>",
                     'parse_mode': 'HTML',
                     'title': safe_base,
                 }
@@ -426,7 +422,12 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                     session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
                     app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                     app.start()
-                    app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+                    caption_html = f"{tge('gem', '💎')} <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>"
+                    caption_fallback = f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>"
+                    try:
+                        app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_html, parse_mode=enums.ParseMode.HTML)
+                    except Exception:
+                        app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_fallback, parse_mode=enums.ParseMode.HTML)
                     app.stop()
                     delete_pyrogram_session_files(session_base)
                 except Exception as e2:
@@ -444,7 +445,12 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
             app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
             app.start()
             try:
-                app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+                caption_html = f"{tge('gem', '💎')} <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>"
+                caption_fallback = f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>"
+                try:
+                    app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_html, parse_mode=enums.ParseMode.HTML)
+                except Exception:
+                    app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_fallback, parse_mode=enums.ParseMode.HTML)
             except Exception as e:
                 print(f"Failed to send audio: {e}")
                 bot_api_send_message(chat_id, f"Send failed: {e}")
@@ -749,7 +755,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
             if download_info and download_info[7] == 'cancelled':  # status field
                 # Загрузка была отменена
                 if start_message_id:
-                    update_download_message(chat_id, start_message_id, "❌ Загрузка отменена пользователем.")
+                    update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Загрузка отменена пользователем.")
                 db.set_work(user_id_for_work or chat_id, 0)
                 delete_file(output_path)
                 return
@@ -760,7 +766,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
                 error_msg += f"\nLast output: {output_lines[-1] if output_lines else 'No output'}"
             
             if start_message_id:
-                update_download_message(chat_id, start_message_id, f"❌ Ошибка загрузки: {error_msg}")
+                update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Ошибка загрузки: {html.escape(error_msg)}")
             else:
                 bot_api_send_message(chat_id, f"Download failed: {error_msg}")
             
@@ -770,7 +776,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
 
         # Обновляем сообщение о успешной загрузке
         if start_message_id:
-            update_download_message(chat_id, start_message_id, "✅ Загрузка завершена. Отправляю файл...")
+            update_download_message(chat_id, start_message_id, f"{tge('check', '✅')} Загрузка завершена. Отправляю файл...")
 
         try:
             ck = select_cookiefile(url)
@@ -1204,7 +1210,7 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
             if download_info and download_info[7] == 'cancelled':  # status field
                 # Загрузка была отменена
                 if start_message_id:
-                    update_download_message(chat_id, start_message_id, "❌ Загрузка отменена пользователем.")
+                    update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Загрузка отменена пользователем.")
                 db.set_work(user_id_for_work or chat_id, 0)
                 delete_file(output_path)
                 return
@@ -1215,7 +1221,7 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                 error_msg += f"\nLast output: {output_lines[-1] if output_lines else 'No output'}"
             
             if start_message_id:
-                update_download_message(chat_id, start_message_id, f"❌ Ошибка загрузки: {error_msg}")
+                update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Ошибка загрузки: {html.escape(error_msg)}")
             else:
                 bot_api_send_message(chat_id, f"Download failed: {error_msg}")
             
@@ -1225,7 +1231,7 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
 
         # Обновляем сообщение о успешной загрузке
         if start_message_id:
-            update_download_message(chat_id, start_message_id, "✅ Загрузка завершена. Отправляю файл...")
+            update_download_message(chat_id, start_message_id, f"{tge('check', '✅')} Загрузка завершена. Отправляю файл...")
 
         possible_thumb = None
         for ext in ('.jpg', '.jpeg', '.webp', '.png'):
@@ -1261,7 +1267,7 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                 url = f"https://api.telegram.org/bot{config.bot_token}/sendAudio"
                 data = {
                     'chat_id': str(chat_id),
-                    'caption': f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>",
+                    'caption': f"{tge('gem', '💎')} <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>",
                     'parse_mode': 'HTML',
                     'title': safe_base,
                 }
@@ -1283,7 +1289,12 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                     session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
                     app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
                     app.start()
-                    app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+                    caption_html = f"{tge('gem', '💎')} <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>"
+                    caption_fallback = f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>"
+                    try:
+                        app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_html, parse_mode=enums.ParseMode.HTML)
+                    except Exception:
+                        app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_fallback, parse_mode=enums.ParseMode.HTML)
                     app.stop()
                     delete_pyrogram_session_files(session_base)
                 except Exception as e2:
@@ -1294,7 +1305,12 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
             app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
             app.start()
             try:
-                app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>", parse_mode=enums.ParseMode.HTML)
+                caption_html = f"{tge('gem', '💎')} <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>"
+                caption_fallback = f"💎 <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>"
+                try:
+                    app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_html, parse_mode=enums.ParseMode.HTML)
+                except Exception:
+                    app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_fallback, parse_mode=enums.ParseMode.HTML)
             except Exception as e:
                 print(f"Failed to send audio: {e}")
                 bot_api_send_message(chat_id, f"Send failed: {e}")

@@ -1,7 +1,0 @@
-Good Day!
-This is an <a href="https://github.com/mercury-devel/telegram_ytdlp">open-source video downloader</a> on telegram
-This bot can download:
-
-Photos and videos from Instagram and TikTok.
-Videos (with quality selection) and audio (in the best quality) from YouTube.
-Music from SoundCloud.

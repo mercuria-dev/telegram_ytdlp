@@ -43,3 +43,6 @@ yt_dlp_remote_components = os.getenv('YTDLP_REMOTE_COMPONENTS', '').strip()
 #   YTDLP_YOUTUBE_EXTRACTOR_ARGS=player_skip=webpage
 yt_dlp_youtube_clients = os.getenv('YTDLP_YOUTUBE_CLIENTS', 'tv').strip()
 yt_dlp_youtube_extractor_args = os.getenv('YTDLP_YOUTUBE_EXTRACTOR_ARGS', '').strip()
+
+# Optional direct image URL used as /start photo (sent with start text as caption)
+start_photo_url = os.getenv('START_PHOTO_URL') or None

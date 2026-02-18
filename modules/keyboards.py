@@ -1,116 +1,261 @@
+from __future__ import annotations
+
 from aiogram import types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types.reply_keyboard_remove import ReplyKeyboardRemove
+from aiogram.types import ReplyKeyboardRemove
 import config
+
+# Bot API 9.4+
+# https://core.telegram.org/bots/api#inlinekeyboardbutton
+
+# === ТВОИ custom_emoji_id ===
+EMOJI = {
+    "subscribe": "5242628160297641831",  # 🔔
+    "check": "5427009714745517609",      # ✅
+    "rocket": "5283080528818360566",     # 🚀
+    "gem": "5280922999241859582",        # 💎
+    "p1080": "5280769763398671636",      # 🏆
+    "p720": "5431449001532594346",       # ⚡️
+    "audio": "5435953773686043487",      # 🎧
+    "no": "5465665476971471368",         # ❌
+    "ban": "5334530826820398405",        # 🔨
+}
+
+
+def tg_emoji_html(emoji_id: str, fallback: str) -> str:
+    return f"<tg-emoji emoji-id=\"{emoji_id}\">{fallback}</tg-emoji>"
+
+
+def tge(key: str, fallback: str) -> str:
+    emoji_id = EMOJI.get(key)
+    if not emoji_id:
+        return fallback
+    return tg_emoji_html(emoji_id, fallback)
+
+
+def _ikb(
+    text: str,
+    *,
+    callback_data: str | None = None,
+    url: str | None = None,
+    style: str | None = None,
+    icon_custom_emoji_id: str | None = None,
+) -> types.InlineKeyboardButton:
+
+    kwargs: dict = {}
+    if callback_data:
+        kwargs["callback_data"] = callback_data
+    if url:
+        kwargs["url"] = url
+    if style:
+        kwargs["style"] = style
+    if icon_custom_emoji_id:
+        kwargs["icon_custom_emoji_id"] = icon_custom_emoji_id
+
+    try:
+        return types.InlineKeyboardButton(text=text, **kwargs)
+    except TypeError:
+        # fallback если aiogram старый
+        kwargs.pop("style", None)
+        kwargs.pop("icon_custom_emoji_id", None)
+        return types.InlineKeyboardButton(text=text, **kwargs)
+
+
+# Public helper (used across the project)
+def ikb(
+    text: str,
+    *,
+    callback_data: str | None = None,
+    url: str | None = None,
+    style: str | None = None,
+    icon_custom_emoji_id: str | None = None,
+) -> types.InlineKeyboardButton:
+    return _ikb(
+        text,
+        callback_data=callback_data,
+        url=url,
+        style=style,
+        icon_custom_emoji_id=icon_custom_emoji_id,
+    )
 
 
 def sub_kb():
-    keyboard_builder = InlineKeyboardBuilder()
-    keyboard_builder.button(text="Subscribe to channel", url=config.channel_link)
-    keyboard_builder.button(text="Check subscription", callback_data="check_subscription")
-    keyboard_builder.adjust(1)
-    return keyboard_builder.as_markup()
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _ikb(
+            "Subscribe to channel",
+            url=config.channel_link,
+            style="primary",
+            icon_custom_emoji_id=EMOJI["subscribe"],
+        )
+    )
+    kb.row(
+        _ikb(
+            "Check subscription",
+            callback_data="check_subscription",
+            style="success",
+            icon_custom_emoji_id=EMOJI["check"],
+        )
+    )
+    return kb.as_markup()
+
 
 def remove_kb():
     return ReplyKeyboardRemove()
 
-def youtube_formats_kb(formats, free: bool = True, force_paid: bool = False, price: int | None = None, token: str | None = None):
-    keyboard_builder = InlineKeyboardBuilder()
-    best_by_note = {}
 
-    def note_for(f):
-        note = f.get('format_note')
+def cancel_download_btn(download_id: str, *, text: str = "Cancel download") -> types.InlineKeyboardButton:
+    return _ikb(
+        text,
+        callback_data=f"cancel_download:{download_id}",
+        style="danger",
+        icon_custom_emoji_id=EMOJI.get("no"),
+    )
+
+
+def cancel_download_kb(download_id: str, *, text: str = "Cancel download") -> types.InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(cancel_download_btn(download_id, text=text))
+    return kb.as_markup()
+
+
+def youtube_formats_kb(
+    formats,
+    free: bool = True,
+    force_paid: bool = False,
+    price: int | None = None,
+    token: str | None = None,
+):
+    kb = InlineKeyboardBuilder()
+    best_by_note: dict[str, dict] = {}
+
+    def note_for(f: dict) -> str | None:
+        note = f.get("format_note")
         if isinstance(note, str) and note and note not in ("N/A", "Default", "Premium"):
             try:
-                int(note.rstrip('p'))
+                int(note.rstrip("p"))
                 return note
             except Exception:
                 pass
-        h = f.get('height')
-        if not h:
-            res = f.get('resolution') or ''
-            try:
-                h = int(str(res).split('x')[-1]) if 'x' in str(res) else None
-            except Exception:
-                h = None
+
+        h = f.get("height")
         if h:
             return f"{int(h)}p"
+
         return None
 
     for f in formats:
         try:
-            if f.get('ext') != "mp4":
+            if f.get("ext") != "mp4":
                 continue
-            if f.get('vcodec') == 'images':
+            if f.get("vcodec") == "images":
                 continue
+
             note = note_for(f)
             if not note:
                 continue
-            try:
-                if int(note.rstrip('p')) > 1080:
-                    continue
-            except Exception:
+
+            if int(note.rstrip("p")) > 1080:
                 continue
 
-            size = f.get('filesize') or f.get('filesize_approx') or 0
+            size = int(f.get("filesize") or f.get("filesize_approx") or 0)
+
             current = best_by_note.get(note)
-            if not current:
-                best_by_note[note] = {
-                    **f,
-                    '_size_for_btn': int(size or 0),
-                }
-            else:
-                cur_size = current.get('_size_for_btn', 0)
-                new_size = int(size or 0)
-                if new_size > cur_size:
-                    best_by_note[note] = {
-                        **f,
-                        '_size_for_btn': new_size,
-                    }
+            if not current or size > int(current.get("_size_for_btn", 0) or 0):
+                best_by_note[note] = {**f, "_size_for_btn": size}
+
         except Exception:
             continue
 
+    suffix = f":{token}" if token else ""
+
     if not best_by_note:
-        keyboard_builder.row(
-            types.InlineKeyboardButton(text="🎧 Audio", callback_data="youtube_download:audio:0:audio"),
+        kb.row(
+            _ikb(
+                "Audio",
+                callback_data=f"youtube_download:audio:0:audio{suffix}",
+                style="primary",
+                icon_custom_emoji_id=EMOJI["audio"],
+            )
         )
-        return keyboard_builder.as_markup()
+        return kb.as_markup()
 
-    sorted_notes = sorted(best_by_note.items(), key=lambda kv: int(kv[0].rstrip('p')))
-    btn_720 = None
-    btn_1080 = None
+    sorted_notes = sorted(best_by_note.items(), key=lambda kv: int(kv[0].rstrip("p")))
+
+    rows: list[tuple[str, str, str | None]] = []
     for note, f in sorted_notes:
-        format_id = f['format_id']
-        size = int(f.get('_size_for_btn', 0) or 0)
-        suffix = f":{token}" if token else ""
-        if note == "720p":
-            btn_720 = types.InlineKeyboardButton(text="720p", callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
-            continue
+        format_id = f["format_id"]
+        size = int(f.get("_size_for_btn", 0) or 0)
+        icon = None
         if note == "1080p":
-            btn_1080 = types.InlineKeyboardButton(text="1080p", callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
-            continue
-        keyboard_builder.button(text=note, callback_data=f"youtube_download:{format_id}:{size}:{note}{suffix}")
+            icon = EMOJI.get("p1080")
+        elif note == "720p":
+            icon = EMOJI.get("p720")
+        rows.append((note, f"youtube_download:{format_id}:{size}:{note}{suffix}", icon))
 
-    keyboard_builder.adjust(6)
-    if btn_720 is not None:
-        keyboard_builder.row(btn_720)
-    if btn_1080 is not None:
-        keyboard_builder.row(btn_1080)
-    keyboard_builder.row(
-        types.InlineKeyboardButton(text="🎧 Audio", callback_data=f"youtube_download:audio:0:audio{suffix}"),
+    rows.append(("Audio", f"youtube_download:audio:0:audio{suffix}", EMOJI.get("audio")))
+
+    n = len(rows)
+    red_rows: set[int] = set()
+    if n == 2:
+        red_rows = {1}
+    elif n >= 3:
+        top = n // 3
+        bottom = n // 3
+        if top == 0:
+            top = 1
+        if bottom == 0:
+            bottom = 1
+        if top + bottom >= n:
+            top = max(1, n - 1)
+            bottom = 1
+
+        red_start = top
+        red_end = n - bottom
+        red_rows = set(range(red_start, red_end))
+
+    for idx, (text, cb, icon) in enumerate(rows):
+        style = "danger" if idx in red_rows else None
+        kb.row(_ikb(text, callback_data=cb, style=style, icon_custom_emoji_id=icon))
+
+    kb.row(
+        _ikb(
+            "Cancel",
+            callback_data="delete_formats_msg",
+            icon_custom_emoji_id=EMOJI.get("no"),
+        )
     )
-    return keyboard_builder.as_markup()
+
+    return kb.as_markup()
+
 
 def confirm_mail_kb():
-    keyboard_builder = InlineKeyboardBuilder()
-    keyboard_builder.button(text="Yes", callback_data=f"mailer:1")
-    keyboard_builder.button(text="No", callback_data=f"mailer:0")
-    keyboard_builder.adjust(2)
-    return keyboard_builder.as_markup()
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _ikb(
+            "Yes",
+            callback_data="mailer:1",
+            style="success",
+            icon_custom_emoji_id=EMOJI["check"],
+        ),
+        _ikb(
+            "No",
+            callback_data="mailer:0",
+            style="danger",
+            icon_custom_emoji_id=EMOJI["no"],
+        ),
+    )
+    return kb.as_markup()
+
 
 def ban_kb(user_id: int):
-    """Inline keyboard with BAN button for logging chat."""
-    keyboard_builder = InlineKeyboardBuilder()
-    keyboard_builder.button(text="❌BAN", callback_data=f"ban:{user_id}")
-    keyboard_builder.adjust(1)
-    return keyboard_builder.as_markup()
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _ikb(
+            "BAN",
+            callback_data=f"ban:{user_id}",
+            style="danger",
+            icon_custom_emoji_id=EMOJI["ban"],
+        )
+    )
+    return kb.as_markup()

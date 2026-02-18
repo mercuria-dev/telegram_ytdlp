@@ -48,6 +48,9 @@ ADMIN_LIST=123,456   # telegram user IDs of admins
 LOG_CHAT=your_log_chat_id (ex. -100987654321)
 # Optional: do not log links for these user IDs in LOG_CHAT
 NO_LOG_WHITELIST=123,456 # telegram user IDs
+
+# Optional: direct image URL to attach on /start (sent as a photo with start text as caption)
+START_PHOTO_URL=https://example.com/banner.jpg
 ```
 
 ## Setup Instructions
