@@ -1,7 +1,9 @@
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+# Load .env from the project directory (next to this file), regardless of current working directory.
+_dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path=_dotenv_path, override=True)
 bot_token = os.getenv('BOT_TOKEN')
 channel_id = int(os.getenv('CHANNEL_ID'))
 channel_link = os.getenv('CHANNEL_LINK')
@@ -46,3 +48,7 @@ yt_dlp_youtube_extractor_args = os.getenv('YTDLP_YOUTUBE_EXTRACTOR_ARGS', '').st
 
 # Optional direct image URL used as /start photo (sent with start text as caption)
 start_photo_url = os.getenv('START_PHOTO_URL') or None
+
+# Optional: Crypto Bot invoice URL for donations (shown on /start as a button)
+# Example: https://t.me/CryptoBot?start=invoice-<id>
+crypto_donate_invoice_url = os.getenv('CRYPTO_DONATE_INVOICE_URL') or None

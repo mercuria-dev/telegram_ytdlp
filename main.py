@@ -126,10 +126,13 @@ start_msg = (
     "Photos and videos from Instagram and TikTok.\n"
     "Videos (with quality selection) and audio (in the best quality) from YouTube.\n"
     "Music from SoundCloud.\n"
+    "\n"
+    "If you want to support the project, you can donate via Crypto Bot.\n"
+    "Press the button below.\n"
 )
 
 async def send_start_message(message: Message):
-    kb = remove_kb()
+    kb = start_kb()
     photo_url = getattr(config, 'start_photo_url', None)
     if photo_url:
         try:

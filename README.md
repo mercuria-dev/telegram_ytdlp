@@ -51,6 +51,9 @@ NO_LOG_WHITELIST=123,456 # telegram user IDs
 
 # Optional: direct image URL to attach on /start (sent as a photo with start text as caption)
 START_PHOTO_URL=https://example.com/banner.jpg
+
+# Optional: donation button on /start (Crypto Bot invoice link)
+CRYPTO_DONATE_INVOICE_URL=https://t.me/CryptoBot?start=invoice-xxxx
 ```
 
 ## Setup Instructions

@@ -104,6 +104,29 @@ def remove_kb():
     return ReplyKeyboardRemove()
 
 
+def start_kb() -> types.ReplyKeyboardRemove | types.InlineKeyboardMarkup:
+    """Start keyboard.
+
+    If CRYPTO_DONATE_INVOICE_URL is set, shows an inline donate button.
+    Otherwise, keeps previous behavior (remove reply keyboard).
+    """
+
+    donate_url = getattr(config, "crypto_donate_invoice_url", None)
+    if not donate_url:
+        return remove_kb()
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _ikb(
+            "Donate (Crypto Bot)",
+            url=donate_url,
+            style="success",
+            icon_custom_emoji_id=EMOJI.get("gem"),
+        )
+    )
+    return kb.as_markup()
+
+
 def cancel_download_btn(download_id: str, *, text: str = "Cancel download") -> types.InlineKeyboardButton:
     return _ikb(
         text,
