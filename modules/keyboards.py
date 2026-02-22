@@ -81,14 +81,27 @@ def ikb(
 
 def sub_kb():
     kb = InlineKeyboardBuilder()
-    kb.row(
-        _ikb(
-            "Subscribe to channel",
-            url=config.channel_link,
-            style="primary",
-            icon_custom_emoji_id=EMOJI["subscribe"],
+    if config.channel_link:
+        kb.row(
+            _ikb(
+                config.channel_name,
+                url=config.channel_link,
+                style="primary",
+                icon_custom_emoji_id=EMOJI["subscribe"],
+            )
         )
-    )
+    
+    for i, link in enumerate(config.extra_channel_links):
+        name = config.extra_channel_names[i] if i < len(config.extra_channel_names) else f"Channel {i+1}"
+        kb.row(
+            _ikb(
+                name,
+                url=link,
+                style="primary",
+                icon_custom_emoji_id=EMOJI["subscribe"],
+            )
+        )
+
     kb.row(
         _ikb(
             "Check subscription",
