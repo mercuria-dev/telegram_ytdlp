@@ -247,6 +247,9 @@ def select_cookiefile(url_or_domain: str | None) -> str | None:
         if 'instagram' in d:
             cand = 'cookies/insta.txt'
             return cand if os.path.exists(cand) else None
+        if 'tiktok' in d:
+            cand = 'cookies/tiktok.txt'
+            return cand if os.path.exists(cand) else None
         # Fallback: use YouTube cookies if available (harmless for other domains)
         cand = 'cookies/youtube.txt'
         return cand if os.path.exists(cand) else None

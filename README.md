@@ -16,8 +16,9 @@ Welcome to the project setup guide! Follow these steps to configure and run the 
 
 ### 1. Configure Cookies
 
-To enhance the scraping of YouTube and Instagram, you need to provide Netscape cookies. Place your cookies in the following files:
+To enhance the scraping of YouTube, Instagram and TikTok, you need to provide Netscape cookies. Place your cookies in the following files:
 - `cookies/insta.txt` for Instagram
+- `cookies/tiktok.txt` for TikTok
 - `cookies/youtube.txt` for YouTube
 
 ### 2. Create and Configure Your Telegram Channel
