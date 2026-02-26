@@ -39,6 +39,13 @@ yt_dlp_platform = os.getenv('YTDLP_PLATFORM', 'auto').lower()
 yt_dlp_js_runtimes = os.getenv('YTDLP_JS_RUNTIMES', '').strip()
 yt_dlp_remote_components = os.getenv('YTDLP_REMOTE_COMPONENTS', '').strip()
 
+# Optional yt-dlp impersonation (useful for TikTok and some protected sites).
+# Examples:
+#   YTDLP_IMPERSONATE=chrome
+#   YTDLP_TIKTOK_IMPERSONATE=chrome
+yt_dlp_impersonate = os.getenv('YTDLP_IMPERSONATE', 'chrome').strip()
+yt_dlp_tiktok_impersonate = os.getenv('YTDLP_TIKTOK_IMPERSONATE', 'chrome').strip()
+
 # YouTube extractor args.
 # Default uses `tv` client to avoid PO Token issues (web/android/ios often require PO tokens and/or SABR).
 # You can override per your needs.
