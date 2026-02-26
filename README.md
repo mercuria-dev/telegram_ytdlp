@@ -21,9 +21,6 @@ To enhance the scraping of YouTube, Instagram and TikTok, you need to provide Ne
 - `cookies/tiktok.txt` for TikTok
 - `cookies/youtube.txt` for YouTube
 
-If TikTok links return HTTP 403, you can enable browser impersonation for yt-dlp:
-- set `YTDLP_TIKTOK_IMPERSONATE=chrome` in `.env`
-
 ### 2. Create and Configure Your Telegram Channel
 
 1. **Create a Telegram Channel:** 

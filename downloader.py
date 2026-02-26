@@ -37,98 +37,6 @@ def _is_youtube(url_or_domain: str | None) -> bool:
         return False
 
 
-def _is_tiktok(url_or_domain: str | None) -> bool:
-    try:
-        if not url_or_domain:
-            return False
-        s = str(url_or_domain).lower()
-        if re.match(r'^https?://', s):
-            d = get_domain(s) or ''
-            return 'tiktok' in d.lower()
-        return 'tiktok' in s
-    except Exception:
-        return False
-
-
-def _tiktok_extractor_args() -> list[str]:
-    """Return yt-dlp args to reduce TikTok 403/CF blocks (impersonation)."""
-    try:
-        target = (getattr(config, 'yt_dlp_tiktok_impersonate', None) or '').strip()
-        if not target:
-            target = (getattr(config, 'yt_dlp_impersonate', None) or '').strip()
-
-        # Auto-default for TikTok: only if the selected yt-dlp executable
-        # reports that impersonation targets are available.
-        if not target and _yt_dlp_has_impersonate_targets():
-            target = 'chrome'
-
-        if target:
-            return ['--impersonate', target]
-        return []
-    except Exception:
-        return []
-
-
-_impersonate_targets_cache: dict[str, bool] = {}
-
-
-def _yt_dlp_has_impersonate_targets() -> bool:
-    """Check whether the selected yt-dlp command supports `--impersonate` targets.
-
-    We intentionally avoid importing/depending on the Python `yt_dlp` module.
-    """
-    try:
-        base_cmd = _build_yt_dlp_cmd([])
-        cache_key = ' '.join(base_cmd)
-        cached = _impersonate_targets_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        cmd = base_cmd + ['--list-impersonate-targets']
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        if proc.returncode != 0:
-            _impersonate_targets_cache[cache_key] = False
-            return False
-
-        out = (proc.stdout or '').splitlines()
-        # Output contains a header and a table; treat as available if any non-header row exists.
-        has_rows = False
-        for line in out:
-            s = (line or '').strip()
-            if not s:
-                continue
-            if s.startswith('['):
-                continue
-            if s.lower().startswith('client'):
-                continue
-            if set(s) <= {'-'}:
-                continue
-            # Any remaining non-empty line is a row
-            has_rows = True
-            break
-
-        _impersonate_targets_cache[cache_key] = has_rows
-        return has_rows
-    except Exception:
-        return False
-
-
-def _build_yt_dlp_cmd(args_list) -> list[str]:
-    """Build yt-dlp command (always executable) based on config."""
-    # Allow overriding executable (can be a full command line).
-    override = getattr(config, 'yt_dlp_executable', None)
-    if override:
-        try:
-            parts = shlex.split(str(override), posix=(os.name != 'nt'))
-            if parts:
-                return parts + list(args_list)
-        except Exception:
-            pass
-
-    exe = dlp_manager.get_selected_executable() or 'yt-dlp'
-    return [exe] + list(args_list)
-
-
 def _youtube_extractor_args() -> list[str]:
     """Return yt-dlp CLI args to reduce YouTube EJS/n-challenge breakage."""
     try:
@@ -169,7 +77,9 @@ def _yt_dlp_runtime_args() -> list[str]:
 
 
 def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: bool = False):
-    cmd = _build_yt_dlp_cmd(args_list)
+    # Prefer selected executable from dlp_manager (dlp/ folder). Falls back to system `yt-dlp`.
+    exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
+    cmd = [exe] + args_list
     if capture_output:
         # Always capture output when caller needs to parse it
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -186,7 +96,8 @@ def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: b
 
 
 def run_yt_dlp_process_with_pid(args_list, download_id: str = None):
-    cmd = _build_yt_dlp_cmd(args_list)
+    exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
+    cmd = [exe] + args_list
     
     # Запускаем процесс с выводом в консоль
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -309,8 +220,6 @@ def get_info_json(url, cookiefile=None):
     args += _yt_dlp_runtime_args()
     if _is_youtube(url):
         args += _youtube_extractor_args()
-    if _is_tiktok(url):
-        args += _tiktok_extractor_args()
     args += [url]
     out = run_yt_dlp_process(args, capture_output=True)
     try:
@@ -431,8 +340,6 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
         args += _yt_dlp_runtime_args()
         if _is_youtube(video_url):
             args += _youtube_extractor_args()
-        if _is_tiktok(video_url):
-            args += _tiktok_extractor_args()
 
         for attempt in range(1, max_retries + 1):
             try:
@@ -593,8 +500,6 @@ def get_video_formats(url, domain):
             args += _yt_dlp_runtime_args()
             if _is_youtube(url or domain):
                 args += _youtube_extractor_args()
-            if _is_tiktok(url or domain):
-                args += _tiktok_extractor_args()
             args += [url]
             out, err = run_yt_dlp_process(args, capture_output=True, return_stderr=True)
             try:
@@ -615,8 +520,6 @@ def get_video_formats(url, domain):
         args += _yt_dlp_runtime_args()
         if _is_youtube(url or domain):
             args += _youtube_extractor_args()
-        if _is_tiktok(url or domain):
-            args += _tiktok_extractor_args()
         args += [url]
         out, err2 = run_yt_dlp_process(args, capture_output=True, return_stderr=True)
         try:
@@ -641,11 +544,10 @@ def _run_list_formats_for_logs(url, domain, ck=None):
         lf_args += _yt_dlp_runtime_args()
         if _is_youtube(url or domain):
             lf_args += _youtube_extractor_args()
-        if _is_tiktok(url or domain):
-            lf_args += _tiktok_extractor_args()
         lf_args += [url]
-
-        cmd = _build_yt_dlp_cmd(lf_args)
+        
+        exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
+        cmd = [exe] + lf_args
         
         # Stream combined stdout/stderr line-by-line to console
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -834,8 +736,6 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         args += _yt_dlp_runtime_args()
         if domain and domain.startswith('youtu'):
             args += _youtube_extractor_args()
-        if _is_tiktok(url or domain):
-            args += _tiktok_extractor_args()
 
         # Запускаем процесс с возможностью отмены
         proc = run_yt_dlp_process_with_pid(args + [url], download_id)
@@ -1087,8 +987,6 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
         args += _yt_dlp_runtime_args()
         if domain and domain.startswith('youtu'):
             args += _youtube_extractor_args()
-        if _is_tiktok(url or domain):
-            args += _tiktok_extractor_args()
 
         max_retries = 3
         last_exc = None
