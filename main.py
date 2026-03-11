@@ -1,4 +1,9 @@
 import asyncio
+import logging
+from logging.handlers import RotatingFileHandler
+import sys
+import faulthandler
+import signal
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, InlineQuery
@@ -32,6 +37,107 @@ from modules import scheduler
 from modules.keyboards import ban_kb
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def _setup_logging() -> None:
+    """Configure rotating file logs + crash hooks.
+
+    Notes:
+      - SIGKILL (e.g., Linux OOM killer) cannot be caught in-process.
+        For that case we rely on the external restart script + last lines in logs.
+    """
+    if getattr(_setup_logging, "_configured", False):
+        return
+
+    try:
+        os.makedirs("logs", exist_ok=True)
+    except Exception:
+        # If we can't create logs folder, still configure console logging.
+        pass
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    fmt = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Console
+    sh = logging.StreamHandler(stream=sys.stdout)
+    sh.setLevel(logging.INFO)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+
+    # Main bot log
+    try:
+        fh = RotatingFileHandler(
+            "logs/bot.log",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except Exception:
+        pass
+
+    # Crash-focused log (errors+tracebacks)
+    try:
+        ch = RotatingFileHandler(
+            "logs/crash.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        ch.setLevel(logging.ERROR)
+        ch.setFormatter(fmt)
+        root.addHandler(ch)
+    except Exception:
+        pass
+
+    # Enable faulthandler (captures segfaults, fatal signals, etc.)
+    try:
+        _fh_file = open("logs/fault.log", "a", buffering=1, encoding="utf-8")
+        faulthandler.enable(file=_fh_file, all_threads=True)
+
+        # Register common fatal-ish signals where supported.
+        for sig_name in ("SIGABRT", "SIGSEGV", "SIGFPE", "SIGILL", "SIGBUS"):
+            sig = getattr(signal, sig_name, None)
+            if sig is None:
+                continue
+            try:
+                faulthandler.register(sig, file=_fh_file, all_threads=True, chain=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    def _excepthook(exc_type, exc, tb):
+        logging.getLogger("crash").critical("Uncaught exception", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = _excepthook
+    _setup_logging._configured = True
+
+
+def _install_asyncio_exception_handler() -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except Exception:
+        return
+
+    def _handler(loop, context):
+        msg = context.get("message")
+        exc = context.get("exception")
+        logging.getLogger("asyncio").error(
+            "Asyncio exception: %s", msg or context, exc_info=exc
+        )
+
+    try:
+        loop.set_exception_handler(_handler)
+    except Exception:
+        pass
 
 # Telegram can reject thumbnails that are not a real photo (e.g. HTML),
 # or images in formats like AVIF/WEBP returned by some CDNs.
@@ -919,6 +1025,8 @@ async def delete_formats_msg_callback(call: CallbackQuery):
 
 
 async def main():
+    _setup_logging()
+    _install_asyncio_exception_handler()
     db.reset_work()
     # Очищаем старые записи о загрузках (старше 24 часов)
     db.cleanup_old_downloads(24)
@@ -965,5 +1073,12 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _setup_logging()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.getLogger("bot").info("Interrupted by user")
+    except Exception:
+        logging.getLogger("crash").exception("Bot crashed")
+        raise
 

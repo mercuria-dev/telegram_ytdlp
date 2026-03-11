@@ -5,6 +5,9 @@ import shutil
 import signal
 import random
 import threading
+import logging
+from logging.handlers import RotatingFileHandler
+from collections import deque
 from pyrogram import Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import config
@@ -22,6 +25,74 @@ import requests
 from modules.keyboards import cancel_download_kb, tge
 
 db = DataBase()
+
+
+def _get_ytdlp_logger() -> logging.Logger:
+    """Dedicated logger for yt-dlp output.
+
+    Writes to logs/ytdlp.log with rotation. Does not spam root logger by default.
+    """
+    logger = logging.getLogger("telegram_ytdlp.ytdlp")
+    if getattr(logger, "_configured", False):
+        return logger
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    try:
+        os.makedirs("logs", exist_ok=True)
+        handler = RotatingFileHandler(
+            "logs/ytdlp.log",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        fmt = logging.Formatter(
+            fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        handler.setFormatter(fmt)
+        handler.setLevel(logging.INFO)
+        logger.addHandler(handler)
+    except Exception:
+        # If file handler fails, still return logger.
+        pass
+
+    logger._configured = True
+    return logger
+
+
+def _cmd_to_str(cmd: list[str]) -> str:
+    try:
+        # Windows friendly
+        if os.name == 'nt':
+            return subprocess.list2cmdline(cmd)
+        # Python 3.8+ has shlex.join
+        import shlex as _shlex
+        return _shlex.join(cmd)
+    except Exception:
+        return ' '.join(str(x) for x in cmd)
+
+
+def _rc_to_reason(rc: int) -> str:
+    # On POSIX, negative return code means "killed by signal".
+    if rc < 0:
+        sig = -rc
+        try:
+            name = signal.Signals(sig).name
+            return f"killed by signal {sig} ({name})"
+        except Exception:
+            return f"killed by signal {sig}"
+    # In shells, an exit code >=128 often means signal (128+N)
+    if rc >= 128:
+        sig = rc - 128
+        if 1 <= sig <= 255:
+            try:
+                name = signal.Signals(sig).name
+                return f"exit {rc} (signal {sig} / {name})"
+            except Exception:
+                return f"exit {rc} (signal {sig})"
+    return f"exit {rc}"
 
 
 def _is_youtube(url_or_domain: str | None) -> bool:
@@ -80,27 +151,74 @@ def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: b
     # Prefer selected executable from dlp_manager (dlp/ folder). Falls back to system `yt-dlp`.
     exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
     cmd = [exe] + args_list
+    logger = _get_ytdlp_logger()
+    cmd_str = _cmd_to_str(cmd)
     if capture_output:
         # Always capture output when caller needs to parse it
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace')
         if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or f"yt-dlp exited {proc.returncode}")
+            reason = _rc_to_reason(proc.returncode)
+            stderr_txt = (proc.stderr or '').strip()
+            stdout_txt = (proc.stdout or '').strip()
+            # Keep the exception readable: include last lines only
+            tail = '\n'.join((stdout_txt.splitlines() + stderr_txt.splitlines())[-30:])
+            logger.error("yt-dlp failed (%s): %s\n%s", reason, cmd_str, tail)
+            raise RuntimeError(stderr_txt or tail or f"yt-dlp failed ({reason})")
+        # Also log stderr (sometimes contains warnings useful for debugging)
+        if (proc.stderr or '').strip():
+            logger.info("yt-dlp stderr: %s", (proc.stderr or '').strip()[-1000:])
         if return_stderr:
             return proc.stdout, proc.stderr
         return proc.stdout
     # When not capturing, always stream output to the console so operator sees progress/logs
-    proc = subprocess.run(cmd)
+    logger.info("yt-dlp start: %s", cmd_str)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+
+    last_lines: deque[str] = deque(maxlen=50)
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            s = (line or '').rstrip('\n')
+            if s:
+                last_lines.append(s)
+                try:
+                    logger.info("%s", s)
+                except Exception:
+                    pass
+                if getattr(config, 'show_yt_dlp_output', True):
+                    try:
+                        print(s)
+                    except Exception:
+                        pass
+
+    proc.wait()
     if proc.returncode != 0:
-        raise RuntimeError(f"yt-dlp exited with code {proc.returncode}")
+        reason = _rc_to_reason(proc.returncode)
+        tail = '\n'.join(list(last_lines)[-30:])
+        logger.error("yt-dlp failed (%s): %s\nLast output:\n%s", reason, cmd_str, tail)
+        raise RuntimeError(f"yt-dlp failed ({reason}). See logs/ytdlp.log")
+    logger.info("yt-dlp done: %s", cmd_str)
     return None
 
 
 def run_yt_dlp_process_with_pid(args_list, download_id: str = None):
     exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
     cmd = [exe] + args_list
+    logger = _get_ytdlp_logger()
+    cmd_str = _cmd_to_str(cmd)
+    logger.info("yt-dlp start%s: %s", f" download_id={download_id}" if download_id else "", cmd_str)
     
     # Запускаем процесс с выводом в консоль
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+
+    # Attach a log path to the process so callers that stream stdout can also tee into a file.
+    try:
+        os.makedirs("logs", exist_ok=True)
+        ts = int(time.time())
+        tag = download_id or f"pid{proc.pid or 'na'}"
+        log_path = os.path.join("logs", f"yt-dlp_{tag}_{ts}.log")
+        setattr(proc, "_ytdlp_log_path", log_path)
+    except Exception:
+        setattr(proc, "_ytdlp_log_path", None)
     
     # Сохраняем PID в базу данных, если передан download_id
     if download_id and proc.pid:
@@ -548,13 +666,20 @@ def _run_list_formats_for_logs(url, domain, ck=None):
         
         exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
         cmd = [exe] + lf_args
+
+        logger = _get_ytdlp_logger()
+        logger.info("yt-dlp list-formats: %s", _cmd_to_str(cmd))
         
         # Stream combined stdout/stderr line-by-line to console
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
         if proc.stdout is not None:
             for line in proc.stdout:
                 try:
-                    print(line.rstrip())
+                    s = (line or '').rstrip()
+                    if s:
+                        logger.info("%s", s)
+                    if getattr(config, 'show_yt_dlp_output', True):
+                        print(s)
                 except Exception:
                     pass
         proc.wait()
@@ -740,14 +865,45 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         # Запускаем процесс с возможностью отмены
         proc = run_yt_dlp_process_with_pid(args + [url], download_id)
         
-        # Читаем вывод процесса
+        # Читаем вывод процесса (и пишем в лог, чтобы при "Killed" остался контекст)
         output_lines = []
-        if proc.stdout:
-            for line in proc.stdout:
-                line = line.strip()
-                if line:
-                    print(line)
+        logger = _get_ytdlp_logger()
+        log_path = getattr(proc, '_ytdlp_log_path', None)
+        log_fh = None
+        try:
+            if log_path:
+                log_fh = open(log_path, 'a', encoding='utf-8', errors='replace', buffering=1)
+        except Exception:
+            log_fh = None
+
+        try:
+            if proc.stdout:
+                for raw in proc.stdout:
+                    line = (raw or '').rstrip('\n')
+                    if not line:
+                        continue
+                    if getattr(config, 'show_yt_dlp_output', True):
+                        try:
+                            print(line)
+                        except Exception:
+                            pass
                     output_lines.append(line)
+                    try:
+                        prefix = f"[{download_id}] " if download_id else ""
+                        logger.info("%s%s", prefix, line)
+                    except Exception:
+                        pass
+                    if log_fh is not None:
+                        try:
+                            log_fh.write(line + "\n")
+                        except Exception:
+                            pass
+        finally:
+            try:
+                if log_fh is not None:
+                    log_fh.close()
+            except Exception:
+                pass
         
         # Ждем завершения процесса
         proc.wait()
@@ -764,9 +920,11 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
                 return
         
         if proc.returncode != 0:
-            error_msg = f"yt-dlp exited with code {proc.returncode}"
+            error_msg = f"yt-dlp failed ({_rc_to_reason(proc.returncode)})"
             if output_lines:
                 error_msg += f"\nLast output: {output_lines[-1] if output_lines else 'No output'}"
+            if log_path:
+                error_msg += f"\nLog: {log_path}"
             
             if start_message_id:
                 update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Ошибка загрузки: {html.escape(error_msg)}")
