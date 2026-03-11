@@ -62,6 +62,50 @@ def _get_ytdlp_logger() -> logging.Logger:
     return logger
 
 
+def _looks_like_netscape_cookiefile(path: str | None) -> bool:
+    """Best-effort check for Netscape cookies.txt format.
+
+    yt-dlp requires Netscape cookie file format. Users sometimes paste JSON here,
+    which makes yt-dlp exit(1). If format is invalid, we skip cookies.
+    """
+    try:
+        if not path or not os.path.exists(path):
+            return False
+        if os.path.getsize(path) <= 0:
+            return False
+
+        with open(path, 'rt', encoding='utf-8', errors='ignore') as f:
+            # Read a small prefix; enough to detect JSON/HTML and the first cookie line.
+            head = f.read(4096)
+
+        s = (head or '').lstrip('\ufeff').lstrip()
+        if not s:
+            return False
+
+        # Common wrong formats
+        if s[0] in '{[':
+            return False
+        if s.lower().startswith('<!doctype') or s.lower().startswith('<html'):
+            return False
+
+        # Accept official header
+        if '# netscape http cookie file' in s.lower():
+            return True
+
+        # Otherwise, look for at least one valid cookie line:
+        # domain \t flag \t path \t secure \t expiration \t name \t value
+        for line in s.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 7:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _cmd_to_str(cmd: list[str]) -> str:
     try:
         # Windows friendly
@@ -132,11 +176,8 @@ def _yt_dlp_runtime_args() -> list[str]:
     try:
         out: list[str] = []
         jsr = (getattr(config, 'yt_dlp_js_runtimes', None) or '').strip()
-        if not jsr:
-            # Deno is "enabled by default" in yt-dlp, but it is usually not installed on Windows.
-            # If Node.js is present, enabling it fixes EJS/n-challenge for YouTube.
-            if shutil.which('node'):
-                jsr = 'node'
+        # Match plain `yt-dlp URL` behavior by default:
+        # do NOT force a JS runtime unless explicitly configured.
         rc = (getattr(config, 'yt_dlp_remote_components', None) or '').strip()
         if jsr:
             out += ['--js-runtimes', jsr]
@@ -361,16 +402,44 @@ def select_cookiefile(url_or_domain: str | None) -> str | None:
         # Prefer site-specific cookies; fallback to YouTube cookies if present
         if 'youtu' in d:
             cand = 'cookies/youtube.txt'
-            return cand if os.path.exists(cand) else None
+            if os.path.exists(cand) and _looks_like_netscape_cookiefile(cand):
+                return cand
+            if os.path.exists(cand):
+                try:
+                    _get_ytdlp_logger().warning("Ignoring invalid cookies file (not Netscape): %s", cand)
+                except Exception:
+                    pass
+            return None
         if 'instagram' in d:
             cand = 'cookies/insta.txt'
-            return cand if os.path.exists(cand) else None
+            if os.path.exists(cand) and _looks_like_netscape_cookiefile(cand):
+                return cand
+            if os.path.exists(cand):
+                try:
+                    _get_ytdlp_logger().warning("Ignoring invalid cookies file (not Netscape): %s", cand)
+                except Exception:
+                    pass
+            return None
         if 'tiktok' in d:
             cand = 'cookies/tiktok.txt'
-            return cand if os.path.exists(cand) else None
+            if os.path.exists(cand) and _looks_like_netscape_cookiefile(cand):
+                return cand
+            if os.path.exists(cand):
+                try:
+                    _get_ytdlp_logger().warning("Ignoring invalid cookies file (not Netscape): %s", cand)
+                except Exception:
+                    pass
+            return None
         # Fallback: use YouTube cookies if available (harmless for other domains)
         cand = 'cookies/youtube.txt'
-        return cand if os.path.exists(cand) else None
+        if os.path.exists(cand) and _looks_like_netscape_cookiefile(cand):
+            return cand
+        if os.path.exists(cand):
+            try:
+                _get_ytdlp_logger().warning("Ignoring invalid cookies file (not Netscape): %s", cand)
+            except Exception:
+                pass
+        return None
     except Exception:
         return None
 
@@ -623,8 +692,9 @@ def get_video_formats(url, domain):
             try:
                 info = json.loads(out)
                 if info and info.get('title'):
-                    # Все равно запускаем --list-formats для логов в консоль
-                    _run_list_formats_for_logs(url, domain, ck)
+                    # Optional: extra `--list-formats` for debug logs
+                    if getattr(config, 'yt_dlp_log_list_formats', False):
+                        _run_list_formats_for_logs(url, domain, ck)
                     return info, err
             except Exception:
                 info = {}
@@ -649,7 +719,8 @@ def get_video_formats(url, domain):
         err = err + '\n' + str(e) if err else str(e)
         info = {}
     
-    _run_list_formats_for_logs(url, domain, ck)
+    if getattr(config, 'yt_dlp_log_list_formats', False):
+        _run_list_formats_for_logs(url, domain, ck)
     
     return info, (err or '')
 
@@ -866,7 +937,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         proc = run_yt_dlp_process_with_pid(args + [url], download_id)
         
         # Читаем вывод процесса (и пишем в лог, чтобы при "Killed" остался контекст)
-        output_lines = []
+        output_lines = deque(maxlen=300)
         logger = _get_ytdlp_logger()
         log_path = getattr(proc, '_ytdlp_log_path', None)
         log_fh = None
@@ -922,7 +993,10 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         if proc.returncode != 0:
             error_msg = f"yt-dlp failed ({_rc_to_reason(proc.returncode)})"
             if output_lines:
-                error_msg += f"\nLast output: {output_lines[-1] if output_lines else 'No output'}"
+                try:
+                    error_msg += f"\nLast output: {list(output_lines)[-1]}"
+                except Exception:
+                    pass
             if log_path:
                 error_msg += f"\nLog: {log_path}"
             

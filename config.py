@@ -46,8 +46,12 @@ yt_dlp_remote_components = os.getenv('YTDLP_REMOTE_COMPONENTS', '').strip()
 #   YTDLP_YOUTUBE_CLIENTS=tv
 #   YTDLP_YOUTUBE_CLIENTS=web_safari
 #   YTDLP_YOUTUBE_EXTRACTOR_ARGS=player_skip=webpage
-yt_dlp_youtube_clients = os.getenv('YTDLP_YOUTUBE_CLIENTS', 'tv').strip()
+yt_dlp_youtube_clients = os.getenv('YTDLP_YOUTUBE_CLIENTS', '').strip()
 yt_dlp_youtube_extractor_args = os.getenv('YTDLP_YOUTUBE_EXTRACTOR_ARGS', '').strip()
+
+# Optional: run extra `yt-dlp --list-formats` for console/file logging.
+# This is useful for debugging, but costs extra CPU/time per request.
+yt_dlp_log_list_formats = os.getenv('YTDLP_LOG_LIST_FORMATS', '0').lower() in ('1', 'true', 'yes')
 
 # Optional direct image URL used as /start photo (sent with start text as caption)
 start_photo_url = os.getenv('START_PHOTO_URL') or None
