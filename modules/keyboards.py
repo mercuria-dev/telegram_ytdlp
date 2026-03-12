@@ -165,6 +165,15 @@ def youtube_formats_kb(
     kb = InlineKeyboardBuilder()
     best_by_note: dict[str, dict] = {}
 
+    def label_for(base_text: str, *, is_audio: bool = False) -> str:
+        if force_paid:
+            return f"{base_text} ({(price or config.stars_price)}⭐)"
+        if free:
+            return base_text
+        if is_audio or base_text in {"720p", "1080p"}:
+            return f"{base_text} ({config.stars_price}⭐)"
+        return base_text
+
     def note_for(f: dict) -> str | None:
         note = f.get("format_note")
         if isinstance(note, str) and note and note not in ("N/A", "Default", "Premium"):
@@ -208,7 +217,7 @@ def youtube_formats_kb(
     if not best_by_note:
         kb.row(
             _ikb(
-                "Audio",
+                label_for("Audio", is_audio=True),
                 callback_data=f"youtube_download:audio:0:audio{suffix}",
                 style="primary",
                 icon_custom_emoji_id=EMOJI["audio"],
@@ -227,9 +236,9 @@ def youtube_formats_kb(
             icon = EMOJI.get("p1080")
         elif note == "720p":
             icon = EMOJI.get("p720")
-        rows.append((note, f"youtube_download:{format_id}:{size}:{note}{suffix}", icon))
+        rows.append((label_for(note), f"youtube_download:{format_id}:{size}:{note}{suffix}", icon))
 
-    rows.append(("Audio", f"youtube_download:audio:0:audio{suffix}", EMOJI.get("audio")))
+    rows.append((label_for("Audio", is_audio=True), f"youtube_download:audio:0:audio{suffix}", EMOJI.get("audio")))
 
     n = len(rows)
     red_rows: set[int] = set()

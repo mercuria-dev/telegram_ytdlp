@@ -36,7 +36,7 @@ To enhance the scraping of YouTube, Instagram and TikTok, you need to provide Ne
 
 ### 3. Configure Environment Variables
 
-Add the following information to your `.env` file (the bot is fully free — no payments):
+Add the following information to your `.env` file:
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
@@ -49,6 +49,11 @@ ADMIN_LIST=123,456   # telegram user IDs of admins
 LOG_CHAT=your_log_chat_id (ex. -100987654321)
 # Optional: do not log links for these user IDs in LOG_CHAT
 NO_LOG_WHITELIST=123,456 # telegram user IDs
+
+# Optional: Telegram Stars pricing
+STARS_PRICE=1
+STARS_PREMIUM_PRICE=5
+FREE_WHITELIST=123,456 # users who can bypass Stars payments
 
 # Optional: direct image URL to attach on /start (sent as a photo with start text as caption)
 START_PHOTO_URL=https://example.com/banner.jpg

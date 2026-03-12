@@ -15,6 +15,7 @@ api_hash = os.getenv('API_HASH')
 admin_list = os.getenv('ADMIN_LIST').split(",")
 stars_price = int(os.getenv('STARS_PRICE', '1'))
 stars_premium_price = int(os.getenv('STARS_PREMIUM_PRICE', '5'))
+free_whitelist = os.getenv('FREE_WHITELIST', '').split(',')
 # IDs (comma-separated) for which link logging to LOG_CHAT is skipped
 no_log_whitelist = os.getenv('NO_LOG_WHITELIST', '').split(',')
 # Chat ID for logging user link requests (optional)

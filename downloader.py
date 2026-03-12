@@ -451,7 +451,19 @@ def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | N
             'text': text,
             'disable_web_page_preview': 'true'
         }
-        # No refund buttons in free mode
+        if payment_payload:
+            pay_price = config.stars_premium_price if ':prem' in str(payment_payload) else config.stars_price
+            reply_markup = {
+                "inline_keyboard": [[
+                    {
+                        "text": f"🔄 Refund {pay_price}⭐",
+                        "callback_data": f"refund:{payment_payload}",
+                    }
+                ]]
+            }
+            data['reply_markup'] = json.dumps(reply_markup)
+        if len(data['text']) > 3500:
+            data['text'] = data['text'][:3500] + "..."
         resp = requests.post(url, data=data, timeout=30)
         if resp.status_code != 200:
             return False
@@ -660,15 +672,17 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
             except Exception:
                 pass
     except Exception as e:
-        try:
-            session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
-            app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-            app.start()
-            app.send_message(chat_id=chat_id, text=f"Download error: {e}")
-            app.stop()
-            delete_pyrogram_session_files(session_base)
-        except Exception:
-            pass
+        sent = bot_api_send_message(chat_id, f"Download error: {e}", payment_payload)
+        if not sent:
+            try:
+                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                app.start()
+                app.send_message(chat_id=chat_id, text=f"Download error: {e}")
+                app.stop()
+                delete_pyrogram_session_files(session_base)
+            except Exception:
+                pass
     db.set_work(user_id_for_work or chat_id, 0)
     try:
         delete_file(output_path)
@@ -839,10 +853,11 @@ def ensure_jpg_thumb(thumb_path, video_path, out_base):
     return None
 
 
-def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_format=None, title_orig="", thumb=None, 
-                                 user_id_for_work=None, session_id=None, download_id: str = None):
+def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_format=None, title_orig="", thumb=None,
+                                 user_id_for_work=None, session_id=None, download_id: str = None, payment_payload=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    final_status = "completed"
     
     start_message_id = None
     if download_id:
@@ -984,6 +999,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
             download_info = db.get_download_by_id(download_id)
             if download_info and download_info[7] == 'cancelled':  # status field
                 # Загрузка была отменена
+                final_status = "cancelled"
                 if start_message_id:
                     update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Загрузка отменена пользователем.")
                 db.set_work(user_id_for_work or chat_id, 0)
@@ -991,6 +1007,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
                 return
         
         if proc.returncode != 0:
+            final_status = "failed"
             error_msg = f"yt-dlp failed ({_rc_to_reason(proc.returncode)})"
             if output_lines:
                 try:
@@ -1002,8 +1019,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
             
             if start_message_id:
                 update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Ошибка загрузки: {html.escape(error_msg)}")
-            else:
-                bot_api_send_message(chat_id, f"Download failed: {error_msg}")
+            bot_api_send_message(chat_id, f"Download failed: {error_msg}", payment_payload)
             
             db.set_work(user_id_for_work or chat_id, 0)
             delete_file(output_path)
@@ -1074,7 +1090,8 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
                     delete_pyrogram_session_files(session_base)
                 except Exception as e2:
                     print(f"Failed to send video (both Bot API and Pyrogram): {e} | {e2}")
-                    bot_api_send_message(chat_id, f"Send failed: {e2}")
+                    final_status = "failed"
+                    bot_api_send_message(chat_id, f"Send failed: {e2}", payment_payload)
         else:
             session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
             app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
@@ -1086,11 +1103,13 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
                     app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
             except Exception as e:
                 print(f"Failed to send video: {e}")
-                bot_api_send_message(chat_id, f"Send failed: {e}")
+                final_status = "failed"
+                bot_api_send_message(chat_id, f"Send failed: {e}", payment_payload)
             app.stop()
             delete_pyrogram_session_files(session_base)
             
     except Exception as e:
+        final_status = "failed"
         try:
             if domain in ["instagram.com", "twitter.com", "x.com"]:
                 output_path = output_path.replace("mp4", "jpg")
@@ -1121,11 +1140,11 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
                     delete_pyrogram_session_files(session_base)
         except Exception:
             # Prefer Bot API error notification
-            bot_api_send_message(chat_id, f"Download error: {e}")
+            bot_api_send_message(chat_id, f"Download error: {e}", payment_payload)
     finally:
         # Обновляем статус в БД
         if download_id:
-            db.update_download_status(download_id, "completed")
+            db.update_download_status(download_id, final_status)
             db.remove_active_download(download_id)
         
         # Удаляем сообщение "Starting download..."
@@ -1234,7 +1253,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
 
         if last_exc is not None:
             msg = str(last_exc)
-            sent = bot_api_send_message(chat_id, f"Download failed after {max_retries} attempts: {msg}")
+            sent = bot_api_send_message(chat_id, f"Download failed after {max_retries} attempts: {msg}", payment_payload)
             if not sent:
                 try:
                     session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
@@ -1310,7 +1329,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     delete_pyrogram_session_files(session_base)
                 except Exception as e2:
                     print(f"Failed to send video (both Bot API and Pyrogram): {e} | {e2}")
-                    bot_api_send_message(chat_id, f"Send failed: {e2}")
+                    bot_api_send_message(chat_id, f"Send failed: {e2}", payment_payload)
                     db.set_work(user_id_for_work or chat_id, 0)
                     try:
                         delete_file(output_path)
@@ -1328,7 +1347,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     app.send_video(chat_id=chat_id, video=output_path, caption=title_orig, thumb=thumb, width=width, height=height)
             except Exception as e:
                 print(f"Failed to send video: {e}")
-                bot_api_send_message(chat_id, f"Send failed: {e}")
+                bot_api_send_message(chat_id, f"Send failed: {e}", payment_payload)
                 app.stop()
                 delete_pyrogram_session_files(session_base)
                 db.set_work(user_id_for_work or chat_id, 0)
@@ -1370,15 +1389,16 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     delete_pyrogram_session_files(session_base)
         except Exception:
             # Prefer Bot API error notification
-            bot_api_send_message(chat_id, f"Download error: {e}")
+            bot_api_send_message(chat_id, f"Download error: {e}", payment_payload)
     db.set_work(user_id_for_work or chat_id, 0)
     delete_file(output_path)
 
 
-def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_username, 
-                              user_id_for_work=None, session_id=None, download_id: str = None):
+def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_username,
+                              user_id_for_work=None, session_id=None, download_id: str = None, payment_payload=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    final_status = "completed"
     
     start_message_id = None
     if download_id:
@@ -1444,6 +1464,7 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
             download_info = db.get_download_by_id(download_id)
             if download_info and download_info[7] == 'cancelled':  # status field
                 # Загрузка была отменена
+                final_status = "cancelled"
                 if start_message_id:
                     update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Загрузка отменена пользователем.")
                 db.set_work(user_id_for_work or chat_id, 0)
@@ -1451,14 +1472,14 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                 return
         
         if proc.returncode != 0:
+            final_status = "failed"
             error_msg = f"yt-dlp exited with code {proc.returncode}"
             if output_lines:
                 error_msg += f"\nLast output: {output_lines[-1] if output_lines else 'No output'}"
             
             if start_message_id:
                 update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Ошибка загрузки: {html.escape(error_msg)}")
-            else:
-                bot_api_send_message(chat_id, f"Download failed: {error_msg}")
+            bot_api_send_message(chat_id, f"Download failed: {error_msg}", payment_payload)
             
             db.set_work(user_id_for_work or chat_id, 0)
             delete_file(output_path)
@@ -1534,7 +1555,8 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                     delete_pyrogram_session_files(session_base)
                 except Exception as e2:
                     print(f"Failed to send audio (both Bot API and Pyrogram): {e} | {e2}")
-                    bot_api_send_message(chat_id, f"Send failed: {e2}")
+                    final_status = "failed"
+                    bot_api_send_message(chat_id, f"Send failed: {e2}", payment_payload)
         else:
             session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
             app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
@@ -1548,7 +1570,8 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                     app.send_audio(chat_id=chat_id, audio=produced_mp3, thumb=audio_thumb, title=safe_base, caption=caption_fallback, parse_mode=enums.ParseMode.HTML)
             except Exception as e:
                 print(f"Failed to send audio: {e}")
-                bot_api_send_message(chat_id, f"Send failed: {e}")
+                final_status = "failed"
+                bot_api_send_message(chat_id, f"Send failed: {e}", payment_payload)
             app.stop()
             delete_pyrogram_session_files(session_base)
         
@@ -1559,19 +1582,22 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                 pass
                 
     except Exception as e:
-        try:
-            session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
-            app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
-            app.start()
-            app.send_message(chat_id=chat_id, text=f"Download error: {e}")
-            app.stop()
-            delete_pyrogram_session_files(session_base)
-        except Exception:
-            pass
+        final_status = "failed"
+        sent = bot_api_send_message(chat_id, f"Download error: {e}", payment_payload)
+        if not sent:
+            try:
+                session_base = f"sessions/{(session_id if session_id is not None else chat_id)}"
+                app = Client(session_base, bot_token=config.bot_token, api_id=config.api_id, api_hash=config.api_hash)
+                app.start()
+                app.send_message(chat_id=chat_id, text=f"Download error: {e}")
+                app.stop()
+                delete_pyrogram_session_files(session_base)
+            except Exception:
+                pass
     finally:
         # Обновляем статус в БД
         if download_id:
-            db.update_download_status(download_id, "completed")
+            db.update_download_status(download_id, final_status)
             db.remove_active_download(download_id)
         
         # Удаляем сообщение "Starting download..."

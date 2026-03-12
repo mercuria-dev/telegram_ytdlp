@@ -89,6 +89,18 @@ class DataBase:
             (payload,), one=True
         )
 
+    def get_payment_by_id(self, payment_id: int):
+        return self.select_request(
+            "SELECT id, user_id, payload, charge_id, status FROM payments WHERE id = ? LIMIT 1",
+            (payment_id,), one=True
+        )
+
+    def get_payment_by_charge_id(self, charge_id: str):
+        return self.select_request(
+            "SELECT id, user_id, payload, charge_id, status FROM payments WHERE charge_id = ? ORDER BY id DESC LIMIT 1",
+            (charge_id,), one=True
+        )
+
     def mark_payment_refunded(self, payload: str):
         self.insert_delete_request(
             "UPDATE payments SET status = 'refunded' WHERE payload = ?",
@@ -109,11 +121,11 @@ class DataBase:
         )
         return row[0] if row else None
 
-        def delete_deeplink(self, token: str):
-            self.insert_delete_request(
-                "DELETE FROM deeplinks WHERE token = ?",
-                (token,)
-            )
+    def delete_deeplink(self, token: str):
+        self.insert_delete_request(
+            "DELETE FROM deeplinks WHERE token = ?",
+            (token,)
+        )
 
     # active downloads management
     def add_active_download(self, download_id: str, user_id: int, chat_id: int, url: str, 
