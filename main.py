@@ -388,11 +388,11 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         item_price = 0
     else:
         if premium_mode:
-            requires_payment = True
             item_price = config.stars_premium_price
+            requires_payment = item_price > 0
         else:
-            requires_payment = (format == "audio") or (note in ("720p", "1080p"))
             item_price = config.stars_price
+            requires_payment = item_price > 0 and ((format == "audio") or (note in ("720p", "1080p")))
 
     if call.message:
         try:
@@ -639,13 +639,18 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 await state.update_data(premium=premium_mode)
                 _wl = {s.strip() for s in config.free_whitelist if s.strip()}
                 is_whitelisted = str(message.from_user.id) in _wl
-                free_user = is_whitelisted
-                force_paid = premium_mode and (not is_whitelisted)
+                premium_price_enabled = config.stars_premium_price > 0
+                standard_price_enabled = config.stars_price > 0
+                free_user = is_whitelisted or (premium_mode and not premium_price_enabled) or ((not premium_mode) and not standard_price_enabled)
+                force_paid = premium_mode and (not is_whitelisted) and premium_price_enabled
                 price_for_buttons = config.stars_premium_price if premium_mode else config.stars_price
                 kb = youtube_formats_kb(formats, free=free_user, force_paid=force_paid, price=price_for_buttons)
                 caption_text = "<tg-emoji emoji-id=\"5375309569905938163\">⭐</tg-emoji>"+title
                 if premium_mode:
-                    caption_text += f"\n\nNote: This video is age-restricted (18+) or has limited access on YouTube and is only accessible with cookies. All download options require {config.stars_premium_price} ⭐."
+                    if premium_price_enabled and not is_whitelisted:
+                        caption_text += f"\n\nNote: This video is age-restricted (18+) or has limited access on YouTube and is only accessible with cookies. All download options require {config.stars_premium_price} ⭐."
+                    else:
+                        caption_text += "\n\nNote: This video is age-restricted (18+) or has limited access on YouTube and is only accessible with cookies."
 
                 # Telegram photo caption limit is 1024 chars
                 caption_for_photo = caption_text[:1024]

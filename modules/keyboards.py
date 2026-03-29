@@ -166,11 +166,12 @@ def youtube_formats_kb(
     best_by_note: dict[str, dict] = {}
 
     def label_for(base_text: str, *, is_audio: bool = False) -> str:
-        if force_paid:
-            return f"{base_text} ({(price or config.stars_price)}⭐)"
+        effective_price = price if price is not None else config.stars_price
+        if force_paid and effective_price > 0:
+            return f"{base_text} ({effective_price}⭐)"
         if free:
             return base_text
-        if is_audio or base_text in {"720p", "1080p"}:
+        if (is_audio or base_text in {"720p", "1080p"}) and config.stars_price > 0:
             return f"{base_text} ({config.stars_price}⭐)"
         return base_text
 
