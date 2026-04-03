@@ -50,6 +50,11 @@ LOG_CHAT=your_log_chat_id (ex. -100987654321)
 # Optional: do not log links for these user IDs in LOG_CHAT
 NO_LOG_WHITELIST=123,456 # telegram user IDs
 
+# Optional yt-dlp proxy. Leave empty to disable proxy.
+# Examples:
+YTDLP_PROXY_URL=http://login:passwd@127.0.0.1:8080
+# YTDLP_PROXY_URL=socks5://login:passwd@127.0.0.1:1080
+
 # Optional: Telegram Stars pricing
 STARS_PRICE=1
 STARS_PREMIUM_PRICE=5

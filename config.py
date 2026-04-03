@@ -40,6 +40,13 @@ yt_dlp_platform = os.getenv('YTDLP_PLATFORM', 'auto').lower()
 yt_dlp_js_runtimes = os.getenv('YTDLP_JS_RUNTIMES', '').strip()
 yt_dlp_remote_components = os.getenv('YTDLP_REMOTE_COMPONENTS', '').strip()
 
+# Optional proxy for all yt-dlp requests.
+# Examples:
+#   YTDLP_PROXY_URL=http://angel:wjOr04eN7SU4X2y@185.107.74.112:8080
+#   YTDLP_PROXY_URL=socks5://angel:wjOr04eN7SU4X2y@185.107.74.112:1080
+# Leave empty to disable proxy completely.
+yt_dlp_proxy_url = os.getenv('YTDLP_PROXY_URL', '').strip()
+
 # YouTube extractor args.
 # Default uses `tv` client to avoid PO Token issues (web/android/ios often require PO tokens and/or SABR).
 # You can override per your needs.

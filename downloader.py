@@ -22,6 +22,7 @@ import html
 from PIL import Image
 import json
 import requests
+from urllib.parse import quote, urlsplit, urlunsplit
 from modules.keyboards import cancel_download_kb, tge
 
 db = DataBase()
@@ -118,6 +119,77 @@ def _cmd_to_str(cmd: list[str]) -> str:
         return ' '.join(str(x) for x in cmd)
 
 
+def _build_ytdlp_proxy_url() -> str | None:
+    try:
+        raw_proxy_url = (getattr(config, 'yt_dlp_proxy_url', None) or '').strip()
+        if raw_proxy_url:
+            return raw_proxy_url
+        return None
+    except Exception:
+        return None
+
+
+def _yt_dlp_proxy_args() -> list[str]:
+    proxy_url = _build_ytdlp_proxy_url()
+    if not proxy_url:
+        return []
+    return ['--proxy', proxy_url]
+
+
+def _redact_proxy_url(proxy_url: str) -> str:
+    try:
+        parsed = urlsplit(proxy_url)
+        if parsed.username is None and parsed.password is None:
+            return proxy_url
+
+        host = parsed.hostname or ''
+        if ':' in host and not host.startswith('['):
+            host = f"[{host}]"
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+
+        auth = quote(parsed.username or '', safe='')
+        if parsed.password is not None:
+            auth += ':***'
+        if auth:
+            host = f"{auth}@{host}"
+
+        return urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+    except Exception:
+        if '@' not in proxy_url:
+            return proxy_url
+        prefix, suffix = proxy_url.rsplit('@', 1)
+        if '://' not in prefix:
+            return proxy_url
+        scheme, creds = prefix.split('://', 1)
+        if ':' in creds:
+            user, _ = creds.split(':', 1)
+            return f"{scheme}://{user}:***@{suffix}"
+        return f"{scheme}://***@{suffix}"
+
+
+def _sanitize_cmd_for_logging(cmd: list[str]) -> list[str]:
+    sanitized: list[str] = []
+    redact_next = False
+    for arg in cmd:
+        if redact_next:
+            sanitized.append(_redact_proxy_url(arg))
+            redact_next = False
+            continue
+
+        if arg == '--proxy':
+            sanitized.append(arg)
+            redact_next = True
+            continue
+
+        if arg.startswith('--proxy='):
+            sanitized.append(f"--proxy={_redact_proxy_url(arg.split('=', 1)[1])}")
+            continue
+
+        sanitized.append(arg)
+    return sanitized
+
+
 def _rc_to_reason(rc: int) -> str:
     # On POSIX, negative return code means "killed by signal".
     if rc < 0:
@@ -175,6 +247,7 @@ def _yt_dlp_runtime_args() -> list[str]:
     """Return global yt-dlp args (JS runtime + remote EJS components), if configured."""
     try:
         out: list[str] = []
+        out += _yt_dlp_proxy_args()
         jsr = (getattr(config, 'yt_dlp_js_runtimes', None) or '').strip()
         # Match plain `yt-dlp URL` behavior by default:
         # do NOT force a JS runtime unless explicitly configured.
@@ -193,7 +266,7 @@ def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: b
     exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
     cmd = [exe] + args_list
     logger = _get_ytdlp_logger()
-    cmd_str = _cmd_to_str(cmd)
+    cmd_str = _cmd_to_str(_sanitize_cmd_for_logging(cmd))
     if capture_output:
         # Always capture output when caller needs to parse it
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace')
@@ -245,7 +318,7 @@ def run_yt_dlp_process_with_pid(args_list, download_id: str = None):
     exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
     cmd = [exe] + args_list
     logger = _get_ytdlp_logger()
-    cmd_str = _cmd_to_str(cmd)
+    cmd_str = _cmd_to_str(_sanitize_cmd_for_logging(cmd))
     logger.info("yt-dlp start%s: %s", f" download_id={download_id}" if download_id else "", cmd_str)
     
     # Запускаем процесс с выводом в консоль
@@ -753,7 +826,7 @@ def _run_list_formats_for_logs(url, domain, ck=None):
         cmd = [exe] + lf_args
 
         logger = _get_ytdlp_logger()
-        logger.info("yt-dlp list-formats: %s", _cmd_to_str(cmd))
+        logger.info("yt-dlp list-formats: %s", _cmd_to_str(_sanitize_cmd_for_logging(cmd)))
         
         # Stream combined stdout/stderr line-by-line to console
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
