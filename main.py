@@ -227,7 +227,7 @@ def is_youtube_playlist_like(url: str) -> bool:
 db = DataBase()
 start_msg = (
     "<tg-emoji emoji-id=\"5373230968943420212\">⭐</tg-emoji> Good Day!\n"
-    "This is an <a href=\"https://github.com/mercury-devel/telegram_ytdlp\">open-source video downloader</a> on telegram\n"
+    "This is an <a href=\"https://github.com/mercuria-dev/telegram_ytdlp\">open-source video downloader</a> on telegram\n"
     "This bot can download:\n\n"
     "Photos and videos from Instagram and TikTok.\n"
     "Videos (with quality selection) and audio (in the best quality) from YouTube.\n"
