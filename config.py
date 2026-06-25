@@ -15,6 +15,11 @@ api_hash = os.getenv('API_HASH')
 admin_list = os.getenv('ADMIN_LIST').split(",")
 stars_price = int(os.getenv('STARS_PRICE', '1'))
 stars_premium_price = int(os.getenv('STARS_PREMIUM_PRICE', '5'))
+# Paid downloads for non-YouTube services (SoundCloud/TikTok/Instagram/Pinterest/VK/X).
+# Enabled by default. Set PAID_OTHER_SERVICES=0 to keep them free.
+paid_other_services = os.getenv('PAID_OTHER_SERVICES', '1').lower() in ('1', 'true', 'yes')
+# If not set separately, use the regular STARS_PRICE.
+other_services_stars_price = int(os.getenv('OTHER_SERVICES_STARS_PRICE', str(stars_price)))
 free_whitelist = os.getenv('FREE_WHITELIST', '').split(',')
 # IDs (comma-separated) for which link logging to LOG_CHAT is skipped
 no_log_whitelist = os.getenv('NO_LOG_WHITELIST', '').split(',')

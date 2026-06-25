@@ -225,6 +225,87 @@ def is_youtube_playlist_like(url: str) -> bool:
         return False
 
 db = DataBase()
+
+def is_free_whitelisted_user(user_id: int) -> bool:
+    return str(user_id) in {s.strip() for s in config.free_whitelist if s.strip()}
+
+def other_services_price_for_user(user_id: int) -> int:
+    if is_free_whitelisted_user(user_id):
+        return 0
+    if not getattr(config, 'paid_other_services', True):
+        return 0
+    return int(getattr(config, 'other_services_stars_price', config.stars_price) or 0)
+
+def service_display_name(domain: str | None) -> str:
+    d = (domain or '').lower()
+    if 'soundcloud.com' in d:
+        return 'SoundCloud'
+    if 'tiktok' in d:
+        return 'TikTok'
+    if 'instagram' in d:
+        return 'Instagram'
+    if 'pinterest' in d:
+        return 'Pinterest'
+    if d == 'vk.com' or 'vkvideo.ru' in d:
+        return 'VK'
+    if d in {'x.com', 'twitter.com'} or 'twitter.com' in d:
+        return 'X / Twitter'
+    return 'Video'
+
+async def send_service_download_invoice(
+    message: Message,
+    state: FSMContext,
+    *,
+    link: str,
+    domain: str,
+    video_path: str,
+    thumbnail_path: str | None,
+    title: str,
+    fmt: str | None,
+    item_title: str | None = None,
+) -> bool:
+    item_price = other_services_price_for_user(message.from_user.id)
+    if item_price <= 0:
+        return False
+
+    service_name = service_display_name(domain)
+    item_title = item_title or f'{service_name} download'
+
+    await state.update_data(purchase={
+        'type': 'audio' if fmt == 'audio' else 'video',
+        'format': fmt,
+        'size': 0,
+        'note': service_name,
+        'link': link,
+        'domain': domain,
+        'video_path': video_path,
+        'thumbnail_path': thumbnail_path,
+        'title': title,
+        'price': item_price,
+    })
+
+    payload_service = (domain or 'download').replace(':', '_')[:32]
+    payload = f'svc:{payload_service}:{message.from_user.id}'
+    await state.update_data(purchase_payload=payload)
+
+    prices = [LabeledPrice(label=item_title, amount=item_price)]
+    try:
+        await message.bot.send_invoice(
+            chat_id=message.chat.id,
+            title=item_title,
+            description=f'Pay {item_price} ⭐ to download',
+            payload=payload,
+            provider_token=None,
+            currency='XTR',
+            prices=prices,
+        )
+    except Exception as e:
+        await message.answer("Couldn't create invoice. Please try again later.")
+        print(f"Service invoice error: {e}")
+        return True
+
+    return True
+
 start_msg = (
     "<tg-emoji emoji-id=\"5373230968943420212\">⭐</tg-emoji> Good Day!\n"
     "This is an <a href=\"https://github.com/mercuria-dev/telegram_ytdlp\">open-source video downloader</a> on telegram\n"
@@ -412,6 +493,7 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             'video_path': video_path,
             'thumbnail_path': thumbnail_path,
             'title': purchase_title,
+            'price': item_price,
         })
         suffix = ":prem" if premium_mode else ""
         item_title = ("YouTube Audio" if format == "audio" else f"YouTube {note or 'video'}") + (" • Premium" if premium_mode else "")
@@ -570,6 +652,19 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                                 file.write(response.content)
                     except Exception:
                         pass
+                if await send_service_download_invoice(
+                    message,
+                    state,
+                    link=link,
+                    domain=domain,
+                    video_path=video_path,
+                    thumbnail_path=thumbnail_path,
+                    title=title_orig,
+                    fmt='audio',
+                    item_title=f'{service_display_name(domain)} Audio',
+                ):
+                    return
+
                 bot_info = await message.bot.get_me()
                 bot_username = bot_info.username
 
@@ -683,6 +778,19 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 # yt-dlp logs are printed to server console only (not sent to Telegram)
             else:
                 if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1 or domain.find("x.com") > -1 or domain.find("twitter.com") > -1:
+                    if await send_service_download_invoice(
+                        message,
+                        state,
+                        link=link,
+                        domain=domain,
+                        video_path=video_path,
+                        thumbnail_path=None,
+                        title=title_orig,
+                        fmt=None,
+                        item_title=f'{service_display_name(domain)} download',
+                    ):
+                        return
+
                     db.set_work(message.from_user.id, 1)
                     # Сообщение о начале загрузки будет отправлено через send_download_started_message
                     # Генерируем ID для загрузки
@@ -759,6 +867,7 @@ async def on_successful_payment(message: Message, state: FSMContext):
 
     payload = sp.invoice_payload or ""
     charge_id = getattr(sp, 'telegram_payment_charge_id', None)
+    purchase = None
 
     try:
         data = await state.get_data()
@@ -818,7 +927,10 @@ async def on_successful_payment(message: Message, state: FSMContext):
         try:
             kb = None
             if payload:
-                pay_price = config.stars_premium_price if (":prem" in str(payload)) else config.stars_price
+                pay_price = int(
+                    (purchase or {}).get('price')
+                    or (config.stars_premium_price if (":prem" in str(payload)) else config.stars_price)
+                )
                 kb = AioInlineKeyboardMarkup(
                     inline_keyboard=[[AioInlineKeyboardButton(text=f"🔄 Refund {pay_price}⭐", callback_data=f"refund:{payload}")]]
                 )
