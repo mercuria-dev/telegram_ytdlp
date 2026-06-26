@@ -503,6 +503,16 @@ def select_cookiefile(url_or_domain: str | None) -> str | None:
                 except Exception:
                     pass
             return None
+        if any(host in d for host in ('twitter.com', 'x.com', 't.co', 'fxtwitter.com', 'vxtwitter.com', 'fixupx.com', 'fixvx.com')):
+            cand = 'cookies/twitter.txt'
+            if os.path.exists(cand) and _looks_like_netscape_cookiefile(cand):
+                return cand
+            if os.path.exists(cand):
+                try:
+                    _get_ytdlp_logger().warning("Ignoring invalid cookies file (not Netscape): %s", cand)
+                except Exception:
+                    pass
+            return None
         # Fallback: use YouTube cookies if available (harmless for other domains)
         cand = 'cookies/youtube.txt'
         if os.path.exists(cand) and _looks_like_netscape_cookiefile(cand):
