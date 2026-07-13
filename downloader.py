@@ -8,10 +8,11 @@ import threading
 import logging
 from logging.handlers import RotatingFileHandler
 from collections import deque
+import asyncio
+asyncio.set_event_loop(asyncio.new_event_loop())
 from pyrogram import Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import config
-import asyncio
 import re
 import time
 from modules.database import DataBase
