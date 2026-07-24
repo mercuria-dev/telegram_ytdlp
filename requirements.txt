@@ -14,14 +14,11 @@ magic-filter==1.0.12
 multidict==6.7.1
 pillow==12.3.0
 propcache==0.5.2
-pyaes==1.6.1
 pydantic==2.13.4
 pydantic_core==2.46.4
-Pyrogram==2.0.106
 PySocks==1.7.1
 python-dotenv==1.2.2
 requests==2.34.2
-TgCrypto==1.2.5
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 urllib3==2.7.0
