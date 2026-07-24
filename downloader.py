@@ -657,9 +657,8 @@ def sanitize_filename(text):
     sanitized_text = re.sub(r'[\\/:"*?<>|]+', '', sanitized_text)
     sanitized_text = re.sub(r'%+', '', sanitized_text)
     sanitized_text = re.sub(r'[\x00-\x1f]', '', sanitized_text)
-    sanitized_text = re.sub(r'\s+', '_', sanitized_text)
-    sanitized_text = re.sub(r'_+', '_', sanitized_text)
-    return sanitized_text[:200]
+    sanitized_text = re.sub(r'\s+', ' ', sanitized_text)
+    return sanitized_text[:200].strip()
 
 def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment_payload=None, user_id_for_work=None, session_id=None):
     loop = asyncio.new_event_loop()
