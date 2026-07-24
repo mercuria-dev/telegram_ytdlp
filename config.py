@@ -5,12 +5,18 @@ import os
 _dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=_dotenv_path, override=True)
 bot_token = os.getenv('BOT_TOKEN')
+# Optional: local/self-hosted Telegram Bot API server (e.g. http://132.243.225.48:6767/).
+# Leave empty to use the official https://api.telegram.org.
+bot_api_url = os.getenv('BOT_API_URL', '').strip().rstrip('/')
+# Base URL for all Bot API HTTP requests (raw aiohttp calls and aiogram session)
+telegram_api_base = bot_api_url or 'https://api.telegram.org'
 channel_id = int(os.getenv('CHANNEL_ID')) if os.getenv('CHANNEL_ID') else None
 channel_link = os.getenv('CHANNEL_LINK')
 channel_name = os.getenv('CHANNEL_NAME', 'Subscribe to channel')
 extra_channel_links = [link.strip() for link in os.getenv('EXTRA_CHANNEL_LINKS', '').split(',')] if os.getenv('EXTRA_CHANNEL_LINKS') else []
 extra_channel_names = [name.strip() for name in os.getenv('EXTRA_CHANNEL_NAMES', '').split(',')] if os.getenv('EXTRA_CHANNEL_NAMES') else []
-api_id = int(os.getenv('API_ID'))
+# No longer required (Pyrogram removed) — kept optional for backward compatibility
+api_id = int(os.getenv('API_ID')) if os.getenv('API_ID') else None
 api_hash = os.getenv('API_HASH')
 admin_list = os.getenv('ADMIN_LIST').split(",")
 stars_price = int(os.getenv('STARS_PRICE', '1'))

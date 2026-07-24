@@ -16,6 +16,8 @@ from modules.database import DataBase
 from modules.keyboards import *
 from modules.state import *
 from aiogram.client.bot import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums.parse_mode import ParseMode
 from config import *
 from modules.middleware.exists_user import ExistsUserMiddleware
@@ -940,7 +942,7 @@ async def on_successful_payment(message: Message, state: FSMContext):
 
 
 async def refund_star_payment(bot_token: str, user_id: int, charge_id: str) -> bool:
-    url = f"https://api.telegram.org/bot{bot_token}/refundStarPayment"
+    url = f"{config.telegram_api_base}/bot{bot_token}/refundStarPayment"
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json={"user_id": user_id, "telegram_payment_charge_id": charge_id}) as resp:
             if resp.status != 200:
@@ -1382,7 +1384,11 @@ async def main():
     except Exception as e:
         print(f"dlp_manager error: {e}")
     bot_properties = DefaultBotProperties(parse_mode=ParseMode.HTML)
-    bot = Bot(token=bot_token, default=bot_properties)
+    session = None
+    if config.bot_api_url:
+        session = AiohttpSession(api=TelegramAPIServer.from_base(config.bot_api_url))
+        print(f"Using local Bot API server: {config.bot_api_url}")
+    bot = Bot(token=bot_token, default=bot_properties, session=session)
 
     # Don't process old (pending) updates after bot restarts
     # Works for polling as well: Telegram will drop queued updates.
