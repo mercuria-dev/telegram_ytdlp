@@ -11,6 +11,8 @@ import config
 DLP_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dlp'))
 INSTALLED_JSON = os.path.join(DLP_DIR, 'installed.json')
 GITHUB_RELEASES = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases'
+# Nightly builds land here before they reach the stable channel above.
+NIGHTLY_RELEASES = 'https://api.github.com/repos/yt-dlp/yt-dlp-nightly-builds/releases'
 
 
 def _pick_windows_asset(assets: list[dict]) -> dict | None:
@@ -108,27 +110,40 @@ def _download_file(url, target_path):
         return False
 
 
-def download_latest_releases(count: int = 2, prefer_asset_names=None):
+def download_latest_releases(count: int = 2, prefer_asset_names=None, channel: str = 'stable'):
     """Download latest `count` releases' yt-dlp executables into `dlp/`.
 
+    `channel` selects the release feed: 'stable' (yt-dlp/yt-dlp) or 'nightly'
+    (yt-dlp/yt-dlp-nightly-builds). Nightly builds carry fixes that haven't
+    reached stable yet, so switching channel is a way to route around a
+    stable-only regression while waiting for the next stable release.
+
     For each release scanned, attempt to download both Windows and Linux assets (if present).
-    Installed records will include a 'platform' field with values 'windows' or 'linux'.
-    The installed.json `selected` field will be a mapping of platform->path when possible.
+    Installed records include 'platform' and 'channel' fields.
+    The installed.json `selected` field is a mapping of channel -> platform -> path.
     """
     ensure_dlp_dir()
     if prefer_asset_names is None:
         prefer_asset_names = ['yt-dlp.exe', 'yt-dlp']
+    channel = (channel or 'stable').strip().lower()
+    releases_url = NIGHTLY_RELEASES if channel == 'nightly' else GITHUB_RELEASES
 
     try:
-        resp = requests.get(GITHUB_RELEASES + '?per_page=10', timeout=15)
+        resp = requests.get(releases_url + '?per_page=10', timeout=15)
         resp.raise_for_status()
         releases = resp.json()
     except Exception as e:
         return {'ok': False, 'error': f'GitHub API error: {e}'}
 
     installed = _load_installed()
-    # installed may contain records with 'platform'
-    installed_keys = {(i.get('tag'), i.get('platform')) for i in installed.get('installed', [])}
+    # Only treat a cached record as satisfying a release if its file still
+    # exists on this machine. Otherwise a stale/foreign-OS path (e.g. carried
+    # over from a Windows checkout) would be trusted forever and never re-downloaded.
+    installed_keys = {
+        (i.get('tag'), i.get('platform'), i.get('channel', 'stable'))
+        for i in installed.get('installed', [])
+        if i.get('path') and os.path.exists(i.get('path'))
+    }
 
     downloaded = []
     # track found platforms
@@ -172,11 +187,11 @@ def download_latest_releases(count: int = 2, prefer_asset_names=None):
         for platform_name, pick in (('windows', win_pick), ('linux', ln_pick)):
             if not pick:
                 continue
-            key = (tag, platform_name)
+            key = (tag, platform_name, channel)
             if key in installed_keys:
-                # already installed
+                # already installed and the file still exists on this machine
                 for rec in installed.get('installed', []):
-                    if rec.get('tag') == tag and rec.get('platform') == platform_name:
+                    if rec.get('tag') == tag and rec.get('platform') == platform_name and rec.get('channel', 'stable') == channel:
                         downloaded.append(rec)
                         found_platforms.add(platform_name)
                         break
@@ -186,12 +201,25 @@ def download_latest_releases(count: int = 2, prefer_asset_names=None):
             if not url:
                 continue
             ext = os.path.splitext(pick.get('name') or '')[1]
-            fname = f"yt-dlp-{tag}-{platform_name}{ext or ''}"
+            fname = f"yt-dlp-{channel}-{tag}-{platform_name}{ext or ''}"
             target = os.path.join(DLP_DIR, fname)
             ok = _download_file(url, target)
             if ok:
-                rec = {'tag': tag, 'path': os.path.abspath(target), 'asset': pick.get('name'), 'downloaded_at': int(time.time()), 'platform': platform_name}
-                installed.get('installed', []).append(rec)
+                rec = {
+                    'tag': tag,
+                    'path': os.path.abspath(target),
+                    'asset': pick.get('name'),
+                    'downloaded_at': int(time.time()),
+                    'platform': platform_name,
+                    'channel': channel,
+                }
+                # Drop any stale record for the same (tag, platform, channel) whose
+                # file no longer exists (e.g. a path left over from another OS).
+                installed['installed'] = [
+                    r for r in installed.get('installed', [])
+                    if not (r.get('tag') == tag and r.get('platform') == platform_name and r.get('channel', 'stable') == channel)
+                ]
+                installed['installed'].append(rec)
                 downloaded.append(rec)
                 found_platforms.add(platform_name)
 
@@ -199,13 +227,13 @@ def download_latest_releases(count: int = 2, prefer_asset_names=None):
         if 'windows' in found_platforms and 'linux' in found_platforms and len(downloaded) >= 2:
             break
 
-    # Normalize installed: keep most recent entries, deduplicate by (platform, tag)
+    # Normalize installed: keep most recent entries, deduplicate by (platform, tag, channel)
     try:
         all_inst = installed.get('installed', [])
         seen = set()
         uniq = []
         for r in sorted(all_inst, key=lambda x: x.get('downloaded_at', 0), reverse=True):
-            key = (r.get('tag'), r.get('platform'))
+            key = (r.get('tag'), r.get('platform'), r.get('channel', 'stable'))
             if key in seen:
                 continue
             seen.add(key)
@@ -213,14 +241,20 @@ def download_latest_releases(count: int = 2, prefer_asset_names=None):
         # keep recent per platform up to `count` releases
         installed['installed'] = uniq[: max(count * 2, len(uniq))]
 
-        # build selected mapping by platform
+        # build selected mapping: channel -> platform -> path, only for this channel's
+        # entries (existing entries for other channels are left as they were).
+        selected = installed.get('selected')
+        if not isinstance(selected, dict) or any(k in ('windows', 'linux') for k in selected):
+            # Legacy flat {'windows': path, 'linux': path} shape (or missing) -> migrate to 'stable'.
+            selected = {'stable': selected} if isinstance(selected, dict) else {}
         sel_map = {}
         for p in ('windows', 'linux'):
             for r in uniq:
-                if r.get('platform') == p:
+                if r.get('platform') == p and r.get('channel', 'stable') == channel and os.path.exists(r.get('path') or ''):
                     sel_map[p] = r.get('path')
                     break
-        installed['selected'] = sel_map
+        selected[channel] = sel_map
+        installed['selected'] = selected
         _save_installed(installed)
     except Exception:
         pass
@@ -232,6 +266,7 @@ def get_selected_executable():
     ensure_dlp_dir()
     installed = _load_installed()
     preferred = getattr(config, 'yt_dlp_platform', 'auto') or 'auto'
+    channel = (getattr(config, 'yt_dlp_channel', 'stable') or 'stable').strip().lower()
 
     def _looks_like_non_x64_windows_exe(path: str | None) -> bool:
         try:
@@ -250,53 +285,46 @@ def get_selected_executable():
             return False
         except Exception:
             return False
-    # if selected is a mapping (platform->path)
-    sel = installed.get('selected')
-    if isinstance(sel, dict):
-        # determine platform to use
-        target_platform = preferred
-        if preferred == 'auto':
-            sys_pl = _platform.system().lower()
-            target_platform = 'windows' if 'windows' in sys_pl else 'linux'
-        path = sel.get(target_platform)
-        if path and os.path.exists(path):
-            if target_platform == 'windows' and _looks_like_non_x64_windows_exe(path):
-                # Skip known non-x64 builds if present
-                path = None
-            else:
-                return path
-    # If selected is a plain path (backwards compat), return it
-    if isinstance(sel, str) and sel and os.path.exists(sel):
-        # Backwards compat: if this is Windows and looks non-x64, keep searching
-        if preferred in ('windows', 'auto'):
-            sys_pl = _platform.system().lower()
-            if ('windows' in sys_pl) and _looks_like_non_x64_windows_exe(sel):
-                pass
-            else:
-                return sel
-        else:
-            return sel
-
-    # Try to find installed according to preferred platform
-    ins = installed.get('installed', [])
     target_platform = preferred
     if preferred == 'auto':
         sys_pl = _platform.system().lower()
         target_platform = 'windows' if 'windows' in sys_pl else 'linux'
-    for r in ins:
-        if r.get('platform') == target_platform and os.path.exists(r.get('path')):
-            pth = r.get('path')
-            if target_platform == 'windows' and _looks_like_non_x64_windows_exe(pth):
-                continue
-            return pth
 
-    # fallback: any installed executable
+    def _valid(path, platform_name):
+        if not path or not os.path.exists(path):
+            return False
+        if platform_name == 'windows' and _looks_like_non_x64_windows_exe(path):
+            return False
+        return True
+
+    # selected: channel -> platform -> path (new shape), or legacy flat platform->path,
+    # or legacy plain string. Only the configured channel is trusted here; a path that
+    # no longer exists on this machine (e.g. carried over from another OS) is skipped
+    # rather than returned, so a broken record can't silently short-circuit everything.
+    sel = installed.get('selected')
+    if isinstance(sel, dict):
+        by_channel = sel.get(channel) if isinstance(sel.get(channel), dict) else None
+        candidates = [by_channel] if by_channel else []
+        if channel == 'stable' and any(k in ('windows', 'linux') for k in sel):
+            candidates.append(sel)  # legacy flat shape, implicitly 'stable'
+        for cand in candidates:
+            path = cand.get(target_platform)
+            if _valid(path, target_platform):
+                return path
+    elif isinstance(sel, str) and channel == 'stable' and _valid(sel, target_platform):
+        return sel
+
+    # Fall back to scanning individual installed records for this channel + platform,
+    # newest first.
+    ins = sorted(installed.get('installed', []), key=lambda r: r.get('downloaded_at', 0), reverse=True)
     for r in ins:
-        p = r.get('path')
-        if p and os.path.exists(p):
-            if target_platform == 'windows' and _looks_like_non_x64_windows_exe(p):
-                continue
-            return p
+        if r.get('platform') == target_platform and r.get('channel', 'stable') == channel and _valid(r.get('path'), target_platform):
+            return r.get('path')
+
+    # Last resort: any installed executable for this platform, regardless of channel.
+    for r in ins:
+        if r.get('platform') == target_platform and _valid(r.get('path'), target_platform):
+            return r.get('path')
 
     # fallback to system yt-dlp in PATH
     return 'yt-dlp'

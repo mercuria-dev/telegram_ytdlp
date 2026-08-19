@@ -1380,7 +1380,7 @@ async def main():
     clear_downloads()
     # Ensure dlp folder has the two latest yt-dlp releases before bot starts
     try:
-        dlp_manager.download_latest_releases(2)
+        dlp_manager.download_latest_releases(2, channel=config.yt_dlp_channel)
     except Exception as e:
         print(f"dlp_manager error: {e}")
     bot_properties = DefaultBotProperties(parse_mode=ParseMode.HTML)

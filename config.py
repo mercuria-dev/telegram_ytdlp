@@ -41,6 +41,11 @@ yt_dlp_executable = os.getenv('YTDLP_EXECUTABLE') or None
 # If 'auto', the runtime platform will be used to pick the executable from dlp/ (or fallback to PATH)
 yt_dlp_platform = os.getenv('YTDLP_PLATFORM', 'auto').lower()
 
+# Release channel for the auto-downloaded yt-dlp executable in dlp/: 'stable' or 'nightly'.
+# Nightly builds often carry YouTube-extractor fixes days/weeks before they reach stable
+# (e.g. https://github.com/yt-dlp/yt-dlp/issues/17456) - switch to 'nightly' to pick those up early.
+yt_dlp_channel = os.getenv('YTDLP_CHANNEL', 'stable').strip().lower()
+
 # yt-dlp tuning knobs.
 #
 # EJS/YouTube JS challenge solving: point yt-dlp at a JS runtime.
