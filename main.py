@@ -1022,9 +1022,12 @@ async def balance_callback(call: CallbackQuery):
         return
 
     text = balance_text(call.from_user.id)
+    in_group = bool(call.message) and getattr(call.message.chat, 'type', 'private') in ("group", "supergroup")
     try:
         # /start sends a photo, whose caption can't be swapped for a plain text message.
-        if call.message and call.message.text:
+        # In a group the message may have been opened by someone else, so post a
+        # fresh one instead of overwriting it with this user's balance.
+        if call.message and call.message.text and not in_group:
             await call.message.edit_text(text, reply_markup=balance_kb())
         elif call.message:
             await call.message.answer(text, reply_markup=balance_kb())
@@ -1058,21 +1061,42 @@ async def topup_callback(call: CallbackQuery):
     nonce = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
     payload = f"topup:{amount}:{call.from_user.id}:{nonce}"
     title = f"Top up {amount} ⭐"
+    invoice = dict(
+        title=title,
+        # Whoever pays is the one credited, so "your" is accurate in a group too.
+        description=f"Add {amount} ⭐ to your balance in this bot. "
+                    f"Paid downloads are then charged automatically.",
+        payload=payload,
+        provider_token=None,
+        currency="XTR",
+        prices=[LabeledPrice(label=title, amount=amount)],
+    )
+
+    # Deliver the invoice where the button was pressed, so a top-up started in a
+    # group is finished in that group. Inline mode has no chat of its own -> PM.
+    target_chat_id = call.message.chat.id if call.message else call.from_user.id
     try:
-        await call.bot.send_invoice(
-            chat_id=call.from_user.id,
-            title=title,
-            description=f"Add {amount} ⭐ to your balance in this bot. "
-                        f"Paid downloads are then charged automatically.",
-            payload=payload,
-            provider_token=None,
-            currency="XTR",
-            prices=[LabeledPrice(label=title, amount=amount)],
-        )
+        await call.bot.send_invoice(chat_id=target_chat_id, **invoice)
         await call.answer()
+        return
     except Exception as e:
-        print(f"Top-up invoice error: {e}")
-        await call.answer("Couldn't create invoice. Open the bot in PM and try again.", show_alert=True)
+        print(f"Top-up invoice error in chat {target_chat_id}: {e}")
+
+    if target_chat_id == call.from_user.id:
+        await call.answer("Couldn't create invoice. Please try again later.", show_alert=True)
+        return
+
+    # The chat wouldn't take the invoice (permissions, or a chat type Telegram
+    # refuses to bill in) — fall back to PM rather than losing the top-up.
+    try:
+        await call.bot.send_invoice(chat_id=call.from_user.id, **invoice)
+        await call.answer("Invoice sent to you in a private message.", show_alert=True)
+    except Exception as e:
+        print(f"Top-up invoice PM fallback error: {e}")
+        await call.answer(
+            "Couldn't create invoice here. Open the bot in PM and use /balance.",
+            show_alert=True,
+        )
 
 
 async def admin_add_balance(message: Message):
