@@ -17,7 +17,7 @@ Features:
 - Auto-downloads the latest `yt-dlp` binaries into `dlp/` on startup (stable or nightly channel).
 - Optional channel-subscription gate (`CHANNEL_ID`) with extra "subscribe" buttons.
 - Optional Telegram Stars payments (separate prices for regular / age-restricted YouTube / other services).
-- Star balance: users top up once (10/50/100/200/500/1000 ⭐) and paid downloads are debited automatically; an empty balance falls back to the per-download invoice.
+- Star balance: users top up once (10/50/100/200/500/1000 ⭐) and paid downloads are debited automatically. Stars are refunded to the balance on their own if a download fails or is cancelled.
 - Optional self-hosted Telegram Bot API server for uploads up to 2 GB.
 - Admin broadcast, refunds, link logging with a ban button, automatic DB backups.
 - Inline mode (`@your_bot <link>`), `/cancel` for active downloads.
@@ -98,7 +98,9 @@ All variables are listed below. Only **Required** ones are needed to start; ever
 | `BALANCE_ENABLED`            | no       | `1`                  | `1` — users can keep a star balance and paid downloads are debited from it; `0` — invoice for every download (old behaviour). |
 | `STARS_TOPUP_OPTIONS`        | no       | `10,50,100,200,500,1000` | Top-up amounts in ⭐ offered as buttons under `/balance`. |
 
-**How the balance works.** `/balance` (or the *My balance* button on `/start`) shows the current balance and the top-up buttons. When a download costs stars, the price is taken from the balance and the download starts right away. If the balance can't cover it, the bot sends the usual one-off invoice — so nothing changes for users who never top up. A download that fails offers a *Refund to balance* button, and a top-up can be refunded in full as long as it hasn't been spent yet.
+**How the balance works.** Stars buy balance, and the balance buys downloads — there is no per-download invoice. `/balance` (or the *My balance* button on `/start`) shows the balance and the top-up buttons. When a download costs stars the price is debited and the download starts right away; if the balance can't cover it the bot asks for a top-up instead of charging. If the download then fails or is cancelled, the stars are returned to the balance automatically — no button to press. A top-up itself can be refunded in full as long as it hasn't been spent yet.
+
+Set `BALANCE_ENABLED=0` to turn the balance off entirely and go back to an invoice per download.
 
 ### /start appearance
 

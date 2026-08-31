@@ -182,20 +182,6 @@ def balance_kb(options: list[int] | None = None) -> types.InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def top_up_kb() -> types.InlineKeyboardMarkup:
-    """Shortcut shown next to a per-download invoice."""
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        _ikb(
-            "Top up balance",
-            callback_data="balance:show",
-            style="success",
-            icon_custom_emoji_id=EMOJI.get("gem"),
-        )
-    )
-    return kb.as_markup()
-
-
 def cancel_download_btn(download_id: str, *, text: str = "Cancel download") -> types.InlineKeyboardButton:
     return _ikb(
         text,

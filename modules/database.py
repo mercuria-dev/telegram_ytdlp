@@ -68,6 +68,12 @@ class DataBase:
                 cursor.execute("ALTER TABLE active_downloads ADD COLUMN message_id INTEGER")
             except sqlite3.OperationalError:
                 pass
+            # Which balance spend paid for a running download, so an interrupted
+            # one can be refunded when the bot comes back up (migration)
+            try:
+                cursor.execute("ALTER TABLE active_downloads ADD COLUMN payment_ref TEXT")
+            except sqlite3.OperationalError:
+                pass
             # Star balance (migration)
             try:
                 cursor.execute("ALTER TABLE users ADD COLUMN balance INTEGER NOT NULL DEFAULT 0")
@@ -257,12 +263,20 @@ class DataBase:
 
     # active downloads management
     def add_active_download(self, download_id: str, user_id: int, chat_id: int, url: str, 
-                           format_id: str = None, process_pid: int = None, file_path: str = None, message_id: int = None):
+                           format_id: str = None, process_pid: int = None, file_path: str = None, message_id: int = None,
+                           payment_ref: str = None):
         self.insert_delete_request(
             """INSERT INTO active_downloads 
-               (download_id, user_id, chat_id, url, format_id, process_pid, file_path, message_id, status) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'downloading')""",
-            (download_id, user_id, chat_id, url, format_id, process_pid, file_path, message_id)
+               (download_id, user_id, chat_id, url, format_id, process_pid, file_path, message_id, payment_ref, status) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'downloading')""",
+            (download_id, user_id, chat_id, url, format_id, process_pid, file_path, message_id, payment_ref)
+        )
+
+    def get_interrupted_paid_downloads(self):
+        """Paid downloads still marked running - i.e. killed with the process."""
+        return self.select_request(
+            """SELECT download_id, user_id, chat_id, payment_ref FROM active_downloads
+               WHERE status = 'downloading' AND payment_ref IS NOT NULL AND payment_ref != ''"""
         )
 
     def get_active_downloads(self, user_id: int):

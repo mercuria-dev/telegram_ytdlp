@@ -527,7 +527,41 @@ def select_cookiefile(url_or_domain: str | None) -> str | None:
     except Exception:
         return None
 
+def auto_refund_to_balance(payment_payload: str | None) -> str | None:
+    """Give a balance spend back automatically when its download didn't happen.
+
+    `payment_payload` is the `bal:<user_id>:<amount>:<nonce>` ref created when the
+    stars were debited. Returns a line to append to the user's message, or None if
+    there was nothing to refund (free download, or a legacy invoice payment).
+
+    Safe to call more than once for the same ref: the ledger refunds it only once.
+    """
+    payload_str = str(payment_payload or '')
+    if not payload_str.startswith('bal:'):
+        return None
+    try:
+        ok, reason, new_balance = db.refund_balance_spend(payload_str)
+    except Exception as e:
+        print(f"auto_refund_to_balance error: {e}")
+        return None
+
+    try:
+        amount = int(payload_str.split(':')[2])
+    except (IndexError, ValueError):
+        amount = 0
+
+    if ok:
+        return f"\n\n↩️ {amount} ⭐ refunded to your balance. Balance: {new_balance} ⭐"
+    if reason == "Already refunded":
+        return None
+    print(f"auto_refund_to_balance failed for {payload_str}: {reason}")
+    return f"\n\n⚠️ Couldn't refund {amount} ⭐ automatically ({reason}). Please contact the admin."
+
+
 def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | None = None) -> bool:
+    """Send a message. Passing `payment_payload` marks this as a failure notice:
+    a balance spend is refunded automatically, a legacy invoice payment still
+    gets a manual refund button."""
     try:
         url = f"{config.telegram_api_base}/bot{config.bot_token}/sendMessage"
         data = {
@@ -535,22 +569,17 @@ def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | N
             'text': text,
             'disable_web_page_preview': 'true'
         }
-        if payment_payload:
-            payload_str = str(payment_payload)
-            if payload_str.startswith('bal:'):
-                # Balance spend: `bal:<user_id>:<amount>:<nonce>` carries its own price.
-                try:
-                    pay_price = int(payload_str.split(':')[2])
-                except (IndexError, ValueError):
-                    pay_price = config.stars_price
-                button_text = f"🔄 Refund {pay_price}⭐ to balance"
-            else:
-                pay_price = config.stars_premium_price if ':prem' in payload_str else config.stars_price
-                button_text = f"🔄 Refund {pay_price}⭐"
+        payload_str = str(payment_payload or '')
+        if payload_str.startswith('bal:'):
+            note = auto_refund_to_balance(payload_str)
+            if note:
+                data['text'] += note
+        elif payment_payload:
+            pay_price = config.stars_premium_price if ':prem' in payload_str else config.stars_price
             reply_markup = {
                 "inline_keyboard": [[
                     {
-                        "text": button_text,
+                        "text": f"🔄 Refund {pay_price}⭐",
                         "callback_data": f"refund:{payment_payload}",
                     }
                 ]]
@@ -1095,8 +1124,12 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
             if download_info and download_info[7] == 'cancelled':  # status field
                 # Загрузка была отменена
                 final_status = "cancelled"
+                # No file was delivered, so give any charged stars back.
+                refund_note = auto_refund_to_balance(payment_payload)
                 if start_message_id:
                     update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Загрузка отменена пользователем.")
+                if refund_note:
+                    bot_api_send_message(chat_id, f"Download cancelled.{refund_note}")
                 db.set_work(user_id_for_work or chat_id, 0)
                 delete_file(output_path)
                 return
@@ -1188,6 +1221,13 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         # Удаляем сообщение "Starting download..."
         if start_message_id:
             delete_download_message(chat_id, start_message_id)
+
+        # Safety net for every exit path: nothing was delivered, so the stars go
+        # back. A no-op if an error branch above already refunded this ref.
+        if final_status != "completed":
+            note = auto_refund_to_balance(payment_payload)
+            if note:
+                bot_api_send_message(chat_id, f"Download didn't complete.{note}")
 
         db.set_work(user_id_for_work or chat_id, 0)
         delete_file(output_path)
@@ -1429,8 +1469,12 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
             if download_info and download_info[7] == 'cancelled':  # status field
                 # Загрузка была отменена
                 final_status = "cancelled"
+                # No file was delivered, so give any charged stars back.
+                refund_note = auto_refund_to_balance(payment_payload)
                 if start_message_id:
                     update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Загрузка отменена пользователем.")
+                if refund_note:
+                    bot_api_send_message(chat_id, f"Download cancelled.{refund_note}")
                 db.set_work(user_id_for_work or chat_id, 0)
                 delete_file(output_path)
                 return
@@ -1511,6 +1555,13 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
         if start_message_id:
             delete_download_message(chat_id, start_message_id)
         
+        # Safety net for every exit path: nothing was delivered, so the stars go
+        # back. A no-op if an error branch above already refunded this ref.
+        if final_status != "completed":
+            note = auto_refund_to_balance(payment_payload)
+            if note:
+                bot_api_send_message(chat_id, f"Download didn't complete.{note}")
+
         db.set_work(user_id_for_work or chat_id, 0)
         try:
             delete_file(output_path)
