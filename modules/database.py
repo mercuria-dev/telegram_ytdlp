@@ -27,6 +27,20 @@ class DataBase:
                     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
                 );
             ''')
+            # Ledger of every balance change (top-ups, spends, refunds, admin grants).
+            # `ref` is the unique token that ties a spend to the download it paid for,
+            # so a failed download can be refunded back to the balance exactly once.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS balance_tx (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    amount INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    ref TEXT,
+                    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                );
+            ''')
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_balance_tx_ref ON balance_tx (ref)")
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS deeplinks (
                     token TEXT PRIMARY KEY,
@@ -54,6 +68,16 @@ class DataBase:
                 cursor.execute("ALTER TABLE active_downloads ADD COLUMN message_id INTEGER")
             except sqlite3.OperationalError:
                 pass
+            # Star balance (migration)
+            try:
+                cursor.execute("ALTER TABLE users ADD COLUMN balance INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            # Paid amount in stars, so a refunded top-up can be taken back off the balance (migration)
+            try:
+                cursor.execute("ALTER TABLE payments ADD COLUMN amount INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
             conn.close()
         except sqlite3.Error as e:
@@ -64,7 +88,9 @@ class DataBase:
         self.insert_delete_request(f"insert into users (user_id) values ({user_id})")
 
     def get_user(self, user_id):
-        user = self.select_request(f"SELECT * FROM users where user_id = {user_id}", one=True)
+        # Explicit columns: callers unpack this as (user_id, work), so `SELECT *`
+        # would break as soon as a column is added to the table.
+        user = self.select_request("SELECT user_id, work FROM users WHERE user_id = ?", (user_id,), one=True)
         return user
 
     def get_users(self):
@@ -77,27 +103,27 @@ class DataBase:
         self.insert_delete_request(f"UPDATE users set work = 0")
 
     # payments
-    def add_payment(self, user_id: int, payload: str, charge_id: str):
+    def add_payment(self, user_id: int, payload: str, charge_id: str, amount: int = 0):
         self.insert_delete_request(
-            "INSERT INTO payments (user_id, payload, charge_id, status) VALUES (?, ?, ?, 'paid')",
-            (user_id, payload, charge_id)
+            "INSERT INTO payments (user_id, payload, charge_id, status, amount) VALUES (?, ?, ?, 'paid', ?)",
+            (user_id, payload, charge_id, int(amount or 0))
         )
 
     def get_payment_by_payload(self, payload: str):
         return self.select_request(
-            "SELECT id, user_id, payload, charge_id, status FROM payments WHERE payload = ? ORDER BY id DESC LIMIT 1",
+            "SELECT id, user_id, payload, charge_id, status, amount FROM payments WHERE payload = ? ORDER BY id DESC LIMIT 1",
             (payload,), one=True
         )
 
     def get_payment_by_id(self, payment_id: int):
         return self.select_request(
-            "SELECT id, user_id, payload, charge_id, status FROM payments WHERE id = ? LIMIT 1",
+            "SELECT id, user_id, payload, charge_id, status, amount FROM payments WHERE id = ? LIMIT 1",
             (payment_id,), one=True
         )
 
     def get_payment_by_charge_id(self, charge_id: str):
         return self.select_request(
-            "SELECT id, user_id, payload, charge_id, status FROM payments WHERE charge_id = ? ORDER BY id DESC LIMIT 1",
+            "SELECT id, user_id, payload, charge_id, status, amount FROM payments WHERE charge_id = ? ORDER BY id DESC LIMIT 1",
             (charge_id,), one=True
         )
 
@@ -105,6 +131,108 @@ class DataBase:
         self.insert_delete_request(
             "UPDATE payments SET status = 'refunded' WHERE payload = ?",
             (payload,)
+        )
+
+    # star balance
+    def get_balance(self, user_id: int) -> int:
+        row = self.select_request(
+            "SELECT balance FROM users WHERE user_id = ?", (user_id,), one=True
+        )
+        return int(row[0] or 0) if row else 0
+
+    def add_balance(self, user_id: int, amount: int, kind: str = 'topup', ref: str | None = None) -> int:
+        """Credit `amount` stars and return the new balance (0 on failure)."""
+        amount = int(amount)
+        conn = sqlite3.connect(self.database_name)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ? WHERE user_id = ?", (amount, user_id))
+            if cursor.rowcount == 0:
+                # User row missing (e.g. paid before the middleware ever saw them).
+                cursor.execute("INSERT INTO users (user_id, work, balance) VALUES (?, 0, ?)", (user_id, amount))
+            cursor.execute(
+                "INSERT INTO balance_tx (user_id, amount, kind, ref) VALUES (?, ?, ?, ?)",
+                (user_id, amount, kind, ref),
+            )
+            conn.commit()
+            cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            return int(row[0] or 0) if row else 0
+        except sqlite3.Error:
+            conn.rollback()
+            print(str(traceback.format_exc())[:4096])
+            return 0
+        finally:
+            conn.close()
+
+    def spend_balance(self, user_id: int, amount: int, ref: str) -> bool:
+        """Atomically debit `amount` stars. Returns False if the balance can't cover it."""
+        amount = int(amount)
+        if amount <= 0:
+            return False
+        conn = sqlite3.connect(self.database_name)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET balance = balance - ? WHERE user_id = ? AND COALESCE(balance, 0) >= ?",
+                (amount, user_id, amount),
+            )
+            if cursor.rowcount == 0:
+                conn.rollback()
+                return False
+            cursor.execute(
+                "INSERT INTO balance_tx (user_id, amount, kind, ref) VALUES (?, ?, 'spend', ?)",
+                (user_id, -amount, ref),
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error:
+            conn.rollback()
+            print(str(traceback.format_exc())[:4096])
+            return False
+        finally:
+            conn.close()
+
+    def refund_balance_spend(self, ref: str) -> tuple[bool, str, int]:
+        """Give back a spend identified by `ref`. Idempotent: a ref refunds at most once.
+
+        Returns (ok, message, new_balance).
+        """
+        conn = sqlite3.connect(self.database_name)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT user_id, amount FROM balance_tx WHERE ref = ? AND kind = 'spend' LIMIT 1", (ref,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False, "Payment not found", 0
+            user_id, amount = int(row[0]), abs(int(row[1]))
+
+            cursor.execute("SELECT 1 FROM balance_tx WHERE ref = ? AND kind = 'refund' LIMIT 1", (ref,))
+            if cursor.fetchone():
+                return False, "Already refunded", 0
+
+            cursor.execute("UPDATE users SET balance = COALESCE(balance, 0) + ? WHERE user_id = ?", (amount, user_id))
+            cursor.execute(
+                "INSERT INTO balance_tx (user_id, amount, kind, ref) VALUES (?, ?, 'refund', ?)",
+                (user_id, amount, ref),
+            )
+            conn.commit()
+            cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+            bal = cursor.fetchone()
+            return True, "ok", int(bal[0] or 0) if bal else 0
+        except sqlite3.Error:
+            conn.rollback()
+            print(str(traceback.format_exc())[:4096])
+            return False, "Database error", 0
+        finally:
+            conn.close()
+
+    def get_balance_history(self, user_id: int, limit: int = 10):
+        return self.select_request(
+            "SELECT amount, kind, created_at FROM balance_tx WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, int(limit)),
         )
 
     # deeplinks

@@ -125,14 +125,70 @@ def start_kb() -> types.ReplyKeyboardRemove | types.InlineKeyboardMarkup:
     """
 
     donate_url = getattr(config, "crypto_donate_invoice_url", None)
-    if not donate_url:
+    balance_on = getattr(config, "balance_enabled", False)
+    if not donate_url and not balance_on:
         return remove_kb()
 
     kb = InlineKeyboardBuilder()
+    if balance_on:
+        kb.row(
+            _ikb(
+                "My balance",
+                callback_data="balance:show",
+                style="primary",
+                icon_custom_emoji_id=EMOJI.get("gem"),
+            )
+        )
+    if donate_url:
+        kb.row(
+            _ikb(
+                "Donate (Crypto Bot)",
+                url=donate_url,
+                style="success",
+                icon_custom_emoji_id=EMOJI.get("gem"),
+            )
+        )
+    return kb.as_markup()
+
+
+def balance_kb(options: list[int] | None = None) -> types.InlineKeyboardMarkup:
+    """Top-up amounts, two per row."""
+    amounts = options if options is not None else getattr(config, "stars_topup_options", [])
+    kb = InlineKeyboardBuilder()
+
+    row: list[types.InlineKeyboardButton] = []
+    for amount in amounts:
+        row.append(
+            _ikb(
+                f"{amount} ⭐",
+                callback_data=f"topup:{amount}",
+                style="primary",
+                icon_custom_emoji_id=EMOJI.get("gem"),
+            )
+        )
+        if len(row) == 2:
+            kb.row(*row)
+            row = []
+    if row:
+        kb.row(*row)
+
     kb.row(
         _ikb(
-            "Donate (Crypto Bot)",
-            url=donate_url,
+            "Close",
+            callback_data="balance:close",
+            icon_custom_emoji_id=EMOJI.get("no"),
+        )
+    )
+    return kb.as_markup()
+
+
+def top_up_kb() -> types.InlineKeyboardMarkup:
+    """Shortcut shown next to a per-download invoice."""
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _ikb(
+            "Top up balance",
+            callback_data="balance:show",
             style="success",
             icon_custom_emoji_id=EMOJI.get("gem"),
         )

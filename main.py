@@ -228,6 +228,69 @@ def is_youtube_playlist_like(url: str) -> bool:
 
 db = DataBase()
 
+
+# ---------------------------------------------------------------- star balance
+#
+# A user tops the balance up once (10/50/100/200/500/1000 ⭐) and every paid
+# download is then silently debited from it. Only when the balance can't cover
+# the price do we fall back to the old per-download Telegram Stars invoice.
+
+def balance_enabled() -> bool:
+    return bool(getattr(config, 'balance_enabled', True))
+
+
+def topup_options() -> list[int]:
+    return list(getattr(config, 'stars_topup_options', []) or [])
+
+
+def make_balance_ref(user_id: int, amount: int) -> str:
+    """Unique token for one balance spend.
+
+    It doubles as the refund callback payload, so the price is embedded in it:
+    `bal:<user_id>:<amount>:<nonce>`.
+    """
+    nonce = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"bal:{user_id}:{int(amount)}:{nonce}"
+
+
+def charge_balance(user_id: int, amount: int) -> str | None:
+    """Debit `amount` stars. Returns the spend ref, or None if the balance can't cover it."""
+    if not balance_enabled() or int(amount) <= 0:
+        return None
+    ref = make_balance_ref(user_id, amount)
+    try:
+        if db.spend_balance(user_id, int(amount), ref):
+            return ref
+    except Exception as e:
+        print(f"charge_balance error: {e}")
+    return None
+
+
+def get_balance(user_id: int) -> int:
+    try:
+        return int(db.get_balance(user_id) or 0)
+    except Exception:
+        return 0
+
+
+def balance_paid_note(user_id: int, amount: int) -> str:
+    return f"Paid {int(amount)} ⭐ from balance.\nBalance left: {get_balance(user_id)} ⭐"
+
+
+def balance_text(user_id: int) -> str:
+    balance = get_balance(user_id)
+    lines = [
+        f"{tge('gem', '💎')} <b>Your balance: {balance} ⭐</b>",
+        "",
+        "Paid downloads are taken from the balance automatically — no invoice to confirm each time.",
+    ]
+    if balance <= 0:
+        lines.append("Your balance is empty, so downloads are still paid one by one.")
+    lines.append("")
+    lines.append("Choose how many stars to add:")
+    return "\n".join(lines)
+
+
 def is_free_whitelisted_user(user_id: int) -> bool:
     return str(user_id) in {s.strip() for s in config.free_whitelist if s.strip()}
 
@@ -254,7 +317,29 @@ def service_display_name(domain: str | None) -> str:
         return 'X / Twitter'
     return 'Video'
 
-async def send_service_download_invoice(
+def invoice_description(item_price: int) -> str:
+    text = f'Pay {item_price} ⭐ to download'
+    if balance_enabled():
+        text += '\nOr top up your balance once and skip this step next time.'
+    return text
+
+
+async def offer_topup(message: Message, item_price: int) -> None:
+    """Nudge the user towards a top-up right after an invoice they had to pay one-off."""
+    if not balance_enabled():
+        return
+    try:
+        await message.answer(
+            f"Your balance is {get_balance(message.from_user.id)} ⭐ — "
+            f"not enough for this download ({item_price} ⭐).\n"
+            "Top it up once and the next downloads will be charged automatically.",
+            reply_markup=top_up_kb(),
+        )
+    except Exception as e:
+        print(f"offer_topup error: {e}")
+
+
+async def charge_service_download(
     message: Message,
     state: FSMContext,
     *,
@@ -265,13 +350,29 @@ async def send_service_download_invoice(
     title: str,
     fmt: str | None,
     item_title: str | None = None,
-) -> bool:
+) -> tuple[bool, str | None]:
+    """Take payment for a non-YouTube download.
+
+    Returns (handled, balance_ref):
+      - (True, None)  -> an invoice was sent, the caller must stop and wait for payment
+      - (False, ref)  -> paid from the balance, the caller downloads and passes `ref`
+                         along as the payment payload so a failure can be refunded
+      - (False, None) -> download is free, nothing to charge
+    """
     item_price = other_services_price_for_user(message.from_user.id)
     if item_price <= 0:
-        return False
+        return False, None
 
     service_name = service_display_name(domain)
     item_title = item_title or f'{service_name} download'
+
+    balance_ref = charge_balance(message.from_user.id, item_price)
+    if balance_ref:
+        try:
+            await message.answer(balance_paid_note(message.from_user.id, item_price))
+        except Exception:
+            pass
+        return False, balance_ref
 
     await state.update_data(purchase={
         'type': 'audio' if fmt == 'audio' else 'video',
@@ -295,7 +396,7 @@ async def send_service_download_invoice(
         await message.bot.send_invoice(
             chat_id=message.chat.id,
             title=item_title,
-            description=f'Pay {item_price} ⭐ to download',
+            description=invoice_description(item_price),
             payload=payload,
             provider_token=None,
             currency='XTR',
@@ -304,9 +405,10 @@ async def send_service_download_invoice(
     except Exception as e:
         await message.answer("Couldn't create invoice. Please try again later.")
         print(f"Service invoice error: {e}")
-        return True
+        return True, None
 
-    return True
+    await offer_topup(message, item_price)
+    return True, None
 
 start_msg = (
     "<tg-emoji emoji-id=\"5373230968943420212\">⭐</tg-emoji> Good Day!\n"
@@ -315,6 +417,9 @@ start_msg = (
     "Photos and videos from Instagram and TikTok.\n"
     "Videos (with quality selection) and audio (in the best quality) from YouTube.\n"
     "Music from SoundCloud.\n"
+    "\n"
+    "Paid downloads can be charged from your star balance — top it up once with /balance "
+    "and you won't have to confirm an invoice for every file.\n"
     "\n"
     "If you want to support the project, you can donate via Crypto Bot.\n"
     "Press the button below.\n"
@@ -483,6 +588,22 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
+    # Balance first: if it covers the price, charge it and download straight away.
+    # Only an empty/insufficient balance falls back to the per-download invoice.
+    balance_ref = None
+    if requires_payment:
+        balance_ref = charge_balance(call.from_user.id, item_price)
+        if balance_ref:
+            requires_payment = False
+            note_text = balance_paid_note(call.from_user.id, item_price)
+            try:
+                if call.message:
+                    await call.message.answer(note_text)
+                else:
+                    await call.answer(note_text, show_alert=True)
+            except Exception:
+                pass
+
     if requires_payment:
         purchase_title = data['title'] if data else video_title
         await state.update_data(purchase={
@@ -507,12 +628,14 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             await call.bot.send_invoice(
                 chat_id=target_chat_id,
                 title=item_title,
-                description=f"Pay {item_price} ⭐ to download",
+                description=invoice_description(item_price),
                 payload=payload,
                 provider_token=None,
                 currency="XTR",
                 prices=prices,
             )
+            if call.message:
+                await offer_topup(call.message, item_price)
         except Exception as e:
             if call.message:
                 await call.message.answer("Couldn't create invoice. Please try again later.")
@@ -569,7 +692,7 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         my_thread = threading.Thread(
             target=simple_downloader_with_cancel, 
             args=(link, video_path, target_chat_id, domain, format, title_for_send, 
-                  thumbnail_path, call.from_user.id, sess_id, download_id)
+                  thumbnail_path, call.from_user.id, sess_id, download_id, balance_ref)
         )
         my_thread.start()
     else:
@@ -580,7 +703,7 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         my_thread = threading.Thread(
             target=download_audio_with_cancel, 
             args=(link, audio_path, target_chat_id, thumbnail_path, bot_username, 
-                  call.from_user.id, sess_id, download_id)
+                  call.from_user.id, sess_id, download_id, balance_ref)
         )
         my_thread.start()
 
@@ -654,7 +777,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                                 file.write(response.content)
                     except Exception:
                         pass
-                if await send_service_download_invoice(
+                handled, balance_ref = await charge_service_download(
                     message,
                     state,
                     link=link,
@@ -664,7 +787,8 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     title=title_orig,
                     fmt='audio',
                     item_title=f'{service_display_name(domain)} Audio',
-                ):
+                )
+                if handled:
                     return
 
                 bot_info = await message.bot.get_me()
@@ -686,7 +810,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     file_path=audio_path,
                     message_id=message_id
                 )
-                my_thread = threading.Thread(target=download_audio_with_cancel, args=(link, audio_path, message.chat.id, thumbnail_path, bot_username, message.from_user.id, str(message.chat.id), download_id))
+                my_thread = threading.Thread(target=download_audio_with_cancel, args=(link, audio_path, message.chat.id, thumbnail_path, bot_username, message.from_user.id, str(message.chat.id), download_id, balance_ref))
                 my_thread.start()
                 return
             elif domain.find("youtu") > -1:
@@ -780,7 +904,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                 # yt-dlp logs are printed to server console only (not sent to Telegram)
             else:
                 if domain.find("tiktok") > -1 or domain.find("instagram") > -1 or domain.find("pinterest") > -1 or domain.find("vk.com") > -1 or domain.find("x.com") > -1 or domain.find("twitter.com") > -1:
-                    if await send_service_download_invoice(
+                    handled, balance_ref = await charge_service_download(
                         message,
                         state,
                         link=link,
@@ -790,7 +914,8 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                         title=title_orig,
                         fmt=None,
                         item_title=f'{service_display_name(domain)} download',
-                    ):
+                    )
+                    if handled:
                         return
 
                     db.set_work(message.from_user.id, 1)
@@ -811,7 +936,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                         file_path=video_path,
                         message_id=message_id
                     )
-                    my_thread = threading.Thread(target=simple_downloader_with_cancel, args=(link, video_path, message.chat.id, domain, None, title_orig, None, message.from_user.id, str(message.chat.id), download_id))
+                    my_thread = threading.Thread(target=simple_downloader_with_cancel, args=(link, video_path, message.chat.id, domain, None, title_orig, None, message.from_user.id, str(message.chat.id), download_id, balance_ref))
                     my_thread.start()
                 else:
                     await send_start_message(message)
@@ -855,11 +980,167 @@ async def all(message: Message, state: FSMContext):
             await send_start_message(message)
 
 
+async def balance_command(message: Message):
+    if not balance_enabled():
+        return
+    await message.answer(balance_text(message.from_user.id), reply_markup=balance_kb())
+
+
+async def balance_callback(call: CallbackQuery):
+    action = call.data.split(":", 1)[1] if ":" in call.data else "show"
+
+    if action == "close":
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+        await call.answer()
+        return
+
+    if not balance_enabled():
+        await call.answer("Balance is disabled", show_alert=True)
+        return
+
+    text = balance_text(call.from_user.id)
+    try:
+        # /start sends a photo, whose caption can't be swapped for a plain text message.
+        if call.message and call.message.text:
+            await call.message.edit_text(text, reply_markup=balance_kb())
+        elif call.message:
+            await call.message.answer(text, reply_markup=balance_kb())
+        else:
+            await call.bot.send_message(call.from_user.id, text, reply_markup=balance_kb())
+    except Exception as e:
+        print(f"balance_callback error: {e}")
+        try:
+            await call.message.answer(text, reply_markup=balance_kb())
+        except Exception:
+            pass
+    await call.answer()
+
+
+async def topup_callback(call: CallbackQuery):
+    if not balance_enabled():
+        await call.answer("Balance is disabled", show_alert=True)
+        return
+
+    try:
+        amount = int(call.data.split(":", 1)[1])
+    except Exception:
+        await call.answer("Invalid amount", show_alert=True)
+        return
+
+    # Only the advertised amounts, so a crafted callback can't invent its own price.
+    if amount not in topup_options():
+        await call.answer("Invalid amount", show_alert=True)
+        return
+
+    nonce = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    payload = f"topup:{amount}:{call.from_user.id}:{nonce}"
+    title = f"Top up {amount} ⭐"
+    try:
+        await call.bot.send_invoice(
+            chat_id=call.from_user.id,
+            title=title,
+            description=f"Add {amount} ⭐ to your balance in this bot. "
+                        f"Paid downloads are then charged automatically.",
+            payload=payload,
+            provider_token=None,
+            currency="XTR",
+            prices=[LabeledPrice(label=title, amount=amount)],
+        )
+        await call.answer()
+    except Exception as e:
+        print(f"Top-up invoice error: {e}")
+        await call.answer("Couldn't create invoice. Open the bot in PM and try again.", show_alert=True)
+
+
+async def admin_add_balance(message: Message):
+    """/addbalance <user_id> <amount> — grant (or take back, with a negative amount) stars."""
+    if str(message.from_user.id) not in config.admin_list:
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer("Usage: <code>/addbalance user_id amount</code>")
+        return
+
+    try:
+        target_id = int(parts[1])
+        amount = int(parts[2])
+    except ValueError:
+        await message.answer("user_id and amount must be numbers")
+        return
+
+    new_balance = db.add_balance(target_id, amount, kind='admin', ref=f"admin:{message.from_user.id}")
+    await message.answer(f"Balance of <code>{target_id}</code> is now {new_balance} ⭐")
+    try:
+        await message.bot.send_message(
+            target_id,
+            f"Your balance was {'topped up by' if amount >= 0 else 'reduced by'} "
+            f"{abs(amount)} ⭐.\nBalance: {new_balance} ⭐",
+        )
+    except Exception:
+        pass
+
+
+async def admin_show_balance(message: Message):
+    """/getbalance <user_id> — read someone's balance."""
+    if str(message.from_user.id) not in config.admin_list:
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Usage: <code>/getbalance user_id</code>")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("user_id must be a number")
+        return
+
+    await message.answer(f"Balance of <code>{target_id}</code>: {get_balance(target_id)} ⭐")
+
+
 async def pre_checkout_handler(pre_checkout_q: PreCheckoutQuery):
     try:
         await pre_checkout_q.bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
     except Exception as e:
         print(f"PreCheckout answer error: {e}")
+
+
+async def credit_topup(message: Message, payload: str, charge_id: str | None, paid_amount: int) -> None:
+    """Add a paid top-up to the user's balance."""
+    try:
+        amount = int(payload.split(":")[1])
+    except Exception:
+        amount = 0
+    # Trust what Telegram says was actually paid.
+    if paid_amount > 0:
+        amount = paid_amount
+
+    if amount <= 0:
+        await message.answer("Top-up failed: invalid amount. Contact the admin.")
+        return
+
+    try:
+        if charge_id:
+            db.add_payment(user_id=message.from_user.id, payload=payload, charge_id=charge_id, amount=amount)
+    except Exception as e:
+        print(f"Failed to save top-up payment: {e}")
+
+    new_balance = db.add_balance(message.from_user.id, amount, kind='topup', ref=payload)
+    kb = None
+    if charge_id:
+        kb = AioInlineKeyboardMarkup(
+            inline_keyboard=[[AioInlineKeyboardButton(text=f"🔄 Refund {amount}⭐", callback_data=f"refund:{payload}")]]
+        )
+    await message.answer(
+        f"Balance topped up by {amount} ⭐ ✅\n"
+        f"Your balance: {new_balance} ⭐\n\n"
+        "Just send a link — paid downloads are now charged from the balance.",
+        reply_markup=kb,
+    )
 
 
 async def on_successful_payment(message: Message, state: FSMContext):
@@ -869,7 +1150,13 @@ async def on_successful_payment(message: Message, state: FSMContext):
 
     payload = sp.invoice_payload or ""
     charge_id = getattr(sp, 'telegram_payment_charge_id', None)
+    paid_amount = int(getattr(sp, 'total_amount', 0) or 0)
     purchase = None
+
+    # A balance top-up buys no download, so it's settled before the order lookup.
+    if payload.startswith("topup:"):
+        await credit_topup(message, payload, charge_id, paid_amount)
+        return
 
     try:
         data = await state.get_data()
@@ -880,7 +1167,12 @@ async def on_successful_payment(message: Message, state: FSMContext):
 
         try:
             if charge_id:
-                db.add_payment(user_id=message.from_user.id, payload=payload, charge_id=charge_id)
+                db.add_payment(
+                    user_id=message.from_user.id,
+                    payload=payload,
+                    charge_id=charge_id,
+                    amount=paid_amount or int(purchase.get('price') or 0),
+                )
         except Exception as e:
             print(f"Failed to save payment: {e}")
 
@@ -959,14 +1251,30 @@ async def refund_payment_record(record) -> tuple[bool, str]:
     if not record:
         return False, "Payment not found"
 
-    payment_id, user_id, payload, charge_id, status = record
+    payment_id, user_id, payload, charge_id, status, amount = record
     if status == 'refunded':
         return False, "Already refunded"
     if not charge_id:
         return False, "Payment has no Telegram charge id"
 
+    amount = int(amount or 0)
+    is_topup = str(payload).startswith("topup:")
+    if is_topup:
+        # Take the stars back off the balance before returning them, so a user
+        # can't refund a top-up they have already spent on downloads.
+        if amount <= 0:
+            return False, "Top-up has no recorded amount"
+        if not db.spend_balance(user_id, amount, f"refund-topup:{payload}"):
+            return False, (
+                f"Balance is only {db.get_balance(user_id)} ⭐ — "
+                f"the {amount} ⭐ top-up has already been spent and can't be refunded."
+            )
+
     ok = await refund_star_payment(config.bot_token, user_id, charge_id)
     if not ok:
+        if is_topup:
+            # Telegram refused: put the stars back so the balance stays honest.
+            db.add_balance(user_id, amount, kind='topup', ref=f"refund-failed:{payload}")
         return False, "Couldn't refund ⭐. Please try again later."
 
     db.mark_payment_refunded(payload)
@@ -980,12 +1288,30 @@ async def refund_handler(call: CallbackQuery):
         await call.answer("Invalid request", show_alert=True)
         return
 
+    # A download paid from the balance has no Telegram charge — give the stars back
+    # to the balance instead.
+    if payload.startswith("bal:"):
+        parts = payload.split(":")
+        if len(parts) < 4 or parts[1] != str(call.from_user.id):
+            await call.answer("This is not your payment", show_alert=True)
+            return
+        ok, reason, new_balance = db.refund_balance_spend(payload)
+        if not ok:
+            await call.answer(reason, show_alert=True)
+            return
+        text = f"Refunded to balance ✅\nYour balance: {new_balance} ⭐"
+        try:
+            await call.message.edit_text(text)
+        except Exception:
+            await call.answer(text, show_alert=True)
+        return
+
     rec = db.get_payment_by_payload(payload)
     if not rec:
         await call.answer("Payment not found", show_alert=True)
         return
 
-    _id, user_id, _payload, charge_id, status = rec
+    _id, user_id, _payload, charge_id, status, _amount = rec
     if user_id != call.from_user.id:
         await call.answer("This is not your payment", show_alert=True)
         return
@@ -1404,11 +1730,16 @@ async def main():
     dp.message.register(welcome, Command(commands="start"))
     dp.message.register(start_mail, Command(commands="mail"))
     dp.message.register(admin_do_refund, Command(commands="dorefund"))
+    dp.message.register(balance_command, Command(commands=["balance", "topup"]))
+    dp.message.register(admin_add_balance, Command(commands="addbalance"))
+    dp.message.register(admin_show_balance, Command(commands="getbalance"))
     dp.message.register(cancel_download_command, Command(commands="cancel"))
     dp.message.register(confirm_mail, CatchMessageState.message)
     dp.callback_query.register(mailer, F.data.startswith("mailer"))
     dp.callback_query.register(youtube_download, F.data.startswith("youtube_download"))
     dp.callback_query.register(refund_handler, F.data.startswith("refund:"))
+    dp.callback_query.register(balance_callback, F.data.startswith("balance:"))
+    dp.callback_query.register(topup_callback, F.data.startswith("topup:"))
     dp.pre_checkout_query.register(pre_checkout_handler)
     dp.message.register(on_successful_payment, F.successful_payment)
     dp.callback_query.register(check_subscription, F.data == "check_subscription")

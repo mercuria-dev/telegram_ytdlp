@@ -536,11 +536,21 @@ def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | N
             'disable_web_page_preview': 'true'
         }
         if payment_payload:
-            pay_price = config.stars_premium_price if ':prem' in str(payment_payload) else config.stars_price
+            payload_str = str(payment_payload)
+            if payload_str.startswith('bal:'):
+                # Balance spend: `bal:<user_id>:<amount>:<nonce>` carries its own price.
+                try:
+                    pay_price = int(payload_str.split(':')[2])
+                except (IndexError, ValueError):
+                    pay_price = config.stars_price
+                button_text = f"🔄 Refund {pay_price}⭐ to balance"
+            else:
+                pay_price = config.stars_premium_price if ':prem' in payload_str else config.stars_price
+                button_text = f"🔄 Refund {pay_price}⭐"
             reply_markup = {
                 "inline_keyboard": [[
                     {
-                        "text": f"🔄 Refund {pay_price}⭐",
+                        "text": button_text,
                         "callback_data": f"refund:{payment_payload}",
                     }
                 ]]

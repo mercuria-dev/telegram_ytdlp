@@ -26,6 +26,33 @@ stars_premium_price = int(os.getenv('STARS_PREMIUM_PRICE', '5'))
 paid_other_services = os.getenv('PAID_OTHER_SERVICES', '1').lower() in ('1', 'true', 'yes')
 # If not set separately, use the regular STARS_PRICE.
 other_services_stars_price = int(os.getenv('OTHER_SERVICES_STARS_PRICE', str(stars_price)))
+# --- Star balance ---
+# Users top the balance up once and every paid download is then debited from it,
+# so they don't have to confirm a Telegram Stars invoice for each file.
+# Set BALANCE_ENABLED=0 to go back to invoice-per-download only.
+balance_enabled = os.getenv('BALANCE_ENABLED', '1').lower() in ('1', 'true', 'yes')
+
+
+def _parse_topup_options(raw: str) -> list[int]:
+    options = []
+    for part in raw.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        if value > 0 and value not in options:
+            options.append(value)
+    return sorted(options)
+
+
+# Amounts (in stars) offered as one-tap top-up buttons.
+stars_topup_options = _parse_topup_options(
+    os.getenv('STARS_TOPUP_OPTIONS', '10,50,100,200,500,1000')
+) or [10, 50, 100, 200, 500, 1000]
+
 free_whitelist = os.getenv('FREE_WHITELIST', '').split(',')
 # IDs (comma-separated) for which link logging to LOG_CHAT is skipped
 no_log_whitelist = os.getenv('NO_LOG_WHITELIST', '').split(',')

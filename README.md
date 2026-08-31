@@ -17,6 +17,7 @@ Features:
 - Auto-downloads the latest `yt-dlp` binaries into `dlp/` on startup (stable or nightly channel).
 - Optional channel-subscription gate (`CHANNEL_ID`) with extra "subscribe" buttons.
 - Optional Telegram Stars payments (separate prices for regular / age-restricted YouTube / other services).
+- Star balance: users top up once (10/50/100/200/500/1000 ⭐) and paid downloads are debited automatically; an empty balance falls back to the per-download invoice.
 - Optional self-hosted Telegram Bot API server for uploads up to 2 GB.
 - Admin broadcast, refunds, link logging with a ban button, automatic DB backups.
 - Inline mode (`@your_bot <link>`), `/cancel` for active downloads.
@@ -94,6 +95,10 @@ All variables are listed below. Only **Required** ones are needed to start; ever
 | `PAID_OTHER_SERVICES`        | no       | `1`                  | `1` — charge Stars for Instagram/TikTok/Pinterest/VK/X/SoundCloud; `0` — keep them free. |
 | `OTHER_SERVICES_STARS_PRICE` | no       | same as `STARS_PRICE` | Price in ⭐ for non-YouTube services |
 | `FREE_WHITELIST`             | no       | —                    | User IDs that never pay: `123,456` |
+| `BALANCE_ENABLED`            | no       | `1`                  | `1` — users can keep a star balance and paid downloads are debited from it; `0` — invoice for every download (old behaviour). |
+| `STARS_TOPUP_OPTIONS`        | no       | `10,50,100,200,500,1000` | Top-up amounts in ⭐ offered as buttons under `/balance`. |
+
+**How the balance works.** `/balance` (or the *My balance* button on `/start`) shows the current balance and the top-up buttons. When a download costs stars, the price is taken from the balance and the download starts right away. If the balance can't cover it, the bot sends the usual one-off invoice — so nothing changes for users who never top up. A download that fails offers a *Refund to balance* button, and a top-up can be refunded in full as long as it hasn't been spent yet.
 
 ### /start appearance
 
@@ -158,6 +163,8 @@ STARS_PREMIUM_PRICE=5
 PAID_OTHER_SERVICES=1
 OTHER_SERVICES_STARS_PRICE=1
 FREE_WHITELIST=123456789
+BALANCE_ENABLED=1
+STARS_TOPUP_OPTIONS=10,50,100,200,500,1000
 
 # --- /start ---
 START_PHOTO_URL=https://example.com/banner.jpg
@@ -207,11 +214,14 @@ The official Bot API limits uploads to 50 MB. A self-hosted server raises it to 
 **Users**
 
 - `/start` — start, then paste a link.
+- `/balance` (or `/topup`) — show your star balance and top it up by 10/50/100/200/500/1000 ⭐.
 - `/cancel` — cancel your active downloads.
 - Inline: `@your_bot <link>` in any chat.
 
 **Admins** (IDs from `ADMIN_LIST`)
 
 - `/mail` — broadcast a message (text/media, HTML formatting preserved) to all users. Send `/cancel` to abort.
-- `/dorefund <payment_id_or_charge_id>` — refund a Stars payment.
+- `/dorefund <payment_id_or_charge_id>` — refund a Stars payment. Refunding a top-up takes the stars back off the balance first, and is refused if they've already been spent.
+- `/addbalance <user_id> <amount>` — grant stars (a negative amount takes them away).
+- `/getbalance <user_id>` — show a user's balance.
 - ❌BAN button in `LOG_CHAT` — ban the user in the channel.
