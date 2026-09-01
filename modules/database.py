@@ -235,6 +235,56 @@ class DataBase:
         finally:
             conn.close()
 
+    def set_balance(self, user_id: int, amount: int, ref: str | None = None) -> int:
+        """Set an absolute balance, recording the difference in the ledger.
+
+        Used by the admin panel. Writing the delta (rather than the new total)
+        keeps balance_tx a truthful running record of the balance.
+        """
+        amount = max(0, int(amount))
+        conn = sqlite3.connect(self.database_name)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(balance, 0) FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row is None:
+                current = 0
+                cursor.execute("INSERT INTO users (user_id, work, balance) VALUES (?, 0, ?)", (user_id, amount))
+            else:
+                current = int(row[0] or 0)
+                cursor.execute("UPDATE users SET balance = ? WHERE user_id = ?", (amount, user_id))
+            delta = amount - current
+            if delta:
+                cursor.execute(
+                    "INSERT INTO balance_tx (user_id, amount, kind, ref) VALUES (?, ?, 'admin', ?)",
+                    (user_id, delta, ref),
+                )
+            conn.commit()
+            return amount
+        except sqlite3.Error:
+            conn.rollback()
+            print(str(traceback.format_exc())[:4096])
+            return -1
+        finally:
+            conn.close()
+
+    def admin_stats(self) -> dict:
+        """Counters for the admin panel."""
+        def one(query, default=0):
+            row = self.select_request(query, one=True)
+            return (row[0] if row and row[0] is not None else default)
+
+        return {
+            "users": one("SELECT COUNT(*) FROM users"),
+            "working": one("SELECT COUNT(*) FROM users WHERE work = 1"),
+            "holders": one("SELECT COUNT(*) FROM users WHERE COALESCE(balance,0) > 0"),
+            "balance_total": one("SELECT SUM(COALESCE(balance,0)) FROM users"),
+            "payments": one("SELECT COUNT(*) FROM payments"),
+            "refunded": one("SELECT COUNT(*) FROM payments WHERE status = 'refunded'"),
+            "stars_paid": one("SELECT SUM(amount) FROM payments WHERE status != 'refunded'"),
+            "active_downloads": one("SELECT COUNT(*) FROM active_downloads WHERE status = 'downloading'"),
+        }
+
     def get_balance_history(self, user_id: int, limit: int = 10):
         return self.select_request(
             "SELECT amount, kind, created_at FROM balance_tx WHERE user_id = ? ORDER BY id DESC LIMIT ?",

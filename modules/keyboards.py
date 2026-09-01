@@ -117,16 +117,17 @@ def remove_kb():
     return ReplyKeyboardRemove()
 
 
-def start_kb() -> types.ReplyKeyboardRemove | types.InlineKeyboardMarkup:
+def start_kb(is_admin: bool = False) -> types.ReplyKeyboardRemove | types.InlineKeyboardMarkup:
     """Start keyboard.
 
-    If CRYPTO_DONATE_INVOICE_URL is set, shows an inline donate button.
+    Shows the balance button when the balance is enabled, a donate button when
+    CRYPTO_DONATE_INVOICE_URL is set, and an admin entry for admins only.
     Otherwise, keeps previous behavior (remove reply keyboard).
     """
 
     donate_url = getattr(config, "crypto_donate_invoice_url", None)
     balance_on = getattr(config, "balance_enabled", False)
-    if not donate_url and not balance_on:
+    if not donate_url and not balance_on and not is_admin:
         return remove_kb()
 
     kb = InlineKeyboardBuilder()
@@ -148,6 +149,52 @@ def start_kb() -> types.ReplyKeyboardRemove | types.InlineKeyboardMarkup:
                 icon_custom_emoji_id=EMOJI.get("gem"),
             )
         )
+    if is_admin:
+        kb.row(
+            _ikb(
+                "Admin panel",
+                callback_data="admin:home",
+                style="danger",
+                icon_custom_emoji_id=EMOJI.get("ban"),
+            )
+        )
+    return kb.as_markup()
+
+
+def admin_kb() -> types.InlineKeyboardMarkup:
+    """Main admin panel."""
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _ikb("Broadcast", callback_data="admin:mail", style="primary",
+             icon_custom_emoji_id=EMOJI.get("subscribe")),
+        _ikb("Set balance", callback_data="admin:balance", style="primary",
+             icon_custom_emoji_id=EMOJI.get("gem")),
+    )
+    kb.row(
+        _ikb("Ban user", callback_data="admin:ban", style="danger",
+             icon_custom_emoji_id=EMOJI.get("ban")),
+        _ikb("Refund", callback_data="admin:refund",
+             icon_custom_emoji_id=EMOJI.get("rocket")),
+    )
+    kb.row(
+        _ikb("Stats", callback_data="admin:stats", style="success",
+             icon_custom_emoji_id=EMOJI.get("check")),
+    )
+    kb.row(_ikb("Close", callback_data="admin:close", icon_custom_emoji_id=EMOJI.get("no")))
+    return kb.as_markup()
+
+
+def admin_back_kb(cancel: bool = False) -> types.InlineKeyboardMarkup:
+    """Return-to-panel button; `cancel` labels it for an open prompt."""
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _ikb(
+            "Cancel" if cancel else "Back",
+            callback_data="admin:home",
+            style="danger" if cancel else None,
+            icon_custom_emoji_id=EMOJI.get("no"),
+        )
+    )
     return kb.as_markup()
 
 

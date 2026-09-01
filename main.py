@@ -295,6 +295,11 @@ def balance_text(user_id: int) -> str:
     return "\n".join(lines)
 
 
+def is_admin(user_id) -> bool:
+    """Admin check that tolerates spaces in ADMIN_LIST."""
+    return str(user_id) in {a.strip() for a in config.admin_list if a.strip()}
+
+
 def is_free_whitelisted_user(user_id: int) -> bool:
     return str(user_id) in {s.strip() for s in config.free_whitelist if s.strip()}
 
@@ -428,7 +433,7 @@ def load_deeplink_context(token: str) -> tuple[str | None, dict | None]:
     return None, None
 
 async def send_start_message(message: Message):
-    kb = start_kb()
+    kb = start_kb(is_admin=is_admin(message.from_user.id))
     photo_url = getattr(config, 'start_photo_url', None)
     if photo_url:
         try:
@@ -1064,7 +1069,7 @@ async def topup_callback(call: CallbackQuery):
 
 async def admin_add_balance(message: Message):
     """/addbalance <user_id> <amount> — grant (or take back, with a negative amount) stars."""
-    if str(message.from_user.id) not in config.admin_list:
+    if not is_admin(message.from_user.id):
         return
 
     parts = (message.text or "").split()
@@ -1093,7 +1098,7 @@ async def admin_add_balance(message: Message):
 
 async def admin_show_balance(message: Message):
     """/getbalance <user_id> — read someone's balance."""
-    if str(message.from_user.id) not in config.admin_list:
+    if not is_admin(message.from_user.id):
         return
 
     parts = (message.text or "").split()
@@ -1346,7 +1351,7 @@ async def refund_handler(call: CallbackQuery):
 
 
 async def admin_do_refund(message: Message):
-    if str(message.from_user.id) not in config.admin_list:
+    if not is_admin(message.from_user.id):
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -1365,8 +1370,228 @@ async def admin_do_refund(message: Message):
     await message.answer(text)
 
 
+# ------------------------------------------------------------------ admin panel
+
+def admin_panel_text() -> str:
+    return (
+        f"{tge('ban', '🔨')} <b>Admin panel</b>\n\n"
+        "Broadcast — send a message to every user.\n"
+        "Set balance — overwrite someone's star balance.\n"
+        "Ban user — ban them in the channel.\n"
+        "Refund — refund a Stars payment by id.\n"
+        "Stats — bot counters."
+    )
+
+
+def admin_stats_text() -> str:
+    st = db.admin_stats()
+    return (
+        f"{tge('check', '📊')} <b>Stats</b>\n\n"
+        f"Users: <b>{st['users']}</b>\n"
+        f"Downloading now: <b>{st['working']}</b> (active jobs: {st['active_downloads']})\n\n"
+        f"Balance holders: <b>{st['holders']}</b>\n"
+        f"Stars on balances: <b>{st['balance_total']} ⭐</b>\n\n"
+        f"Payments: <b>{st['payments']}</b> (refunded: {st['refunded']})\n"
+        f"Stars kept: <b>{st['stars_paid']} ⭐</b>"
+    )
+
+
+async def show_admin_panel(call: CallbackQuery) -> None:
+    """Render the panel over the message the button came from."""
+    try:
+        if call.message and call.message.text:
+            await call.message.edit_text(admin_panel_text(), reply_markup=admin_kb())
+        elif call.message:
+            await call.message.answer(admin_panel_text(), reply_markup=admin_kb())
+        else:
+            await call.bot.send_message(call.from_user.id, admin_panel_text(), reply_markup=admin_kb())
+    except Exception as e:
+        print(f"show_admin_panel error: {e}")
+        try:
+            await call.message.answer(admin_panel_text(), reply_markup=admin_kb())
+        except Exception:
+            pass
+
+
+async def admin_panel_command(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(admin_panel_text(), reply_markup=admin_kb())
+
+
+async def admin_callback(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        await call.answer("No rights", show_alert=True)
+        return
+
+    action = call.data.split(":", 1)[1] if ":" in call.data else "home"
+
+    if action == "close":
+        await state.clear()
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+        await call.answer()
+        return
+
+    # Leaving any open prompt returns to a clean panel.
+    await state.clear()
+
+    if action == "home":
+        await show_admin_panel(call)
+    elif action == "stats":
+        try:
+            await call.message.edit_text(admin_stats_text(), reply_markup=admin_back_kb())
+        except Exception:
+            await call.message.answer(admin_stats_text(), reply_markup=admin_back_kb())
+    elif action == "mail":
+        await state.set_state(CatchMessageState.message)
+        await call.message.edit_text(
+            "Send the message to broadcast — text, photo, video or animation.\n"
+            "Formatting is preserved.",
+            reply_markup=admin_back_kb(cancel=True),
+        )
+    elif action == "balance":
+        await state.set_state(AdminState.set_balance)
+        await call.message.edit_text(
+            f"{tge('gem', '💎')} <b>Set balance</b>\n\n"
+            "Send: <code>user_id amount</code>\n"
+            "Example: <code>123456789 500</code>\n\n"
+            "The balance is set to exactly that value (not added).\n"
+            "Send <code>user_id</code> alone to just look it up.",
+            reply_markup=admin_back_kb(cancel=True),
+        )
+    elif action == "ban":
+        await state.set_state(AdminState.ban)
+        await call.message.edit_text(
+            f"{tge('ban', '🔨')} <b>Ban user</b>\n\n"
+            "Send the <code>user_id</code> to ban in the channel.",
+            reply_markup=admin_back_kb(cancel=True),
+        )
+    elif action == "refund":
+        await state.set_state(AdminState.refund)
+        await call.message.edit_text(
+            "↩️ <b>Refund</b>\n\n"
+            "Send a <code>payment_id</code> or a <code>charge_id</code>.",
+            reply_markup=admin_back_kb(cancel=True),
+        )
+    else:
+        await show_admin_panel(call)
+
+    await call.answer()
+
+
+async def _admin_prompt_guard(message: Message, state: FSMContext) -> bool:
+    """Shared prologue for the panel's text prompts. True = keep handling."""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return False
+    if (message.text or "").strip() == "/cancel":
+        await state.clear()
+        await message.answer("Cancelled.", reply_markup=admin_kb())
+        return False
+    return True
+
+
+async def admin_set_balance_input(message: Message, state: FSMContext):
+    if not await _admin_prompt_guard(message, state):
+        return
+
+    parts = (message.text or "").split()
+    try:
+        target_id = int(parts[0])
+    except (IndexError, ValueError):
+        await message.answer(
+            "Send <code>user_id amount</code>, or <code>user_id</code> to look it up.",
+            reply_markup=admin_back_kb(cancel=True),
+        )
+        return
+
+    if len(parts) == 1:
+        await state.clear()
+        await message.answer(
+            f"User <code>{target_id}</code>\nBalance: <b>{get_balance(target_id)} ⭐</b>",
+            reply_markup=admin_kb(),
+        )
+        return
+
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        await message.answer("The amount must be a number.", reply_markup=admin_back_kb(cancel=True))
+        return
+    if amount < 0:
+        await message.answer("The amount can't be negative.", reply_markup=admin_back_kb(cancel=True))
+        return
+
+    before = get_balance(target_id)
+    new_balance = db.set_balance(target_id, amount, ref=f"admin:{message.from_user.id}")
+    await state.clear()
+    if new_balance < 0:
+        await message.answer("Couldn't update the balance. Check the logs.", reply_markup=admin_kb())
+        return
+
+    await message.answer(
+        f"{tge('check', '✅')} Balance of <code>{target_id}</code>: "
+        f"{before} ⭐ → <b>{new_balance} ⭐</b>",
+        reply_markup=admin_kb(),
+    )
+    try:
+        await message.bot.send_message(
+            target_id, f"Your balance was updated by an admin.\nBalance: {new_balance} ⭐"
+        )
+    except Exception as e:
+        print(f"Balance notice to {target_id} failed: {e}")
+
+
+async def admin_ban_input(message: Message, state: FSMContext):
+    if not await _admin_prompt_guard(message, state):
+        return
+
+    try:
+        target_id = int((message.text or "").split()[0])
+    except (IndexError, ValueError):
+        await message.answer("Send a numeric <code>user_id</code>.", reply_markup=admin_back_kb(cancel=True))
+        return
+
+    if not config.channel_id:
+        await state.clear()
+        await message.answer("CHANNEL_ID isn't configured, nothing to ban from.", reply_markup=admin_kb())
+        return
+
+    await state.clear()
+    try:
+        await message.bot.ban_chat_member(chat_id=config.channel_id, user_id=target_id)
+        await message.answer(f"{tge('ban', '🔨')} User <code>{target_id}</code> banned.", reply_markup=admin_kb())
+    except Exception as e:
+        print(f"Admin ban error: {e}")
+        await message.answer(f"Ban failed: {html.escape(str(e))}", reply_markup=admin_kb())
+
+
+async def admin_refund_input(message: Message, state: FSMContext):
+    if not await _admin_prompt_guard(message, state):
+        return
+
+    transaction_id = (message.text or "").strip().split()[0] if (message.text or "").strip() else ""
+    if not transaction_id:
+        await message.answer("Send a payment id or charge id.", reply_markup=admin_back_kb(cancel=True))
+        return
+
+    rec = None
+    if transaction_id.isdigit():
+        rec = db.get_payment_by_id(int(transaction_id))
+    if not rec:
+        rec = db.get_payment_by_charge_id(transaction_id)
+
+    await state.clear()
+    ok, text = await refund_payment_record(rec)
+    await message.answer(text, reply_markup=admin_kb())
+
+
 async def start_mail(message: Message, state: FSMContext):
-    if str(message.from_user.id) not in config.admin_list:
+    if not is_admin(message.from_user.id):
         return
     await message.answer("Send a message to forward to all users\n/cancel to cancel.")
     await state.set_state(CatchMessageState.message)
@@ -1399,6 +1624,9 @@ async def confirm_mail(message: Message, state: FSMContext):
     await message.answer("Send message to all users?", reply_markup=confirm_mail_kb())
 
 async def mailer(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        await call.answer("No rights", show_alert=True)
+        return
     _, res = call.data.split(":")
     if res == "0":
         await call.message.delete()
@@ -1592,7 +1820,7 @@ async def check_subscription(call: CallbackQuery):
 async def ban_user(call: CallbackQuery):
     """Ban user from the channel using callback data ban:<user_id>. Only admins allowed."""
     try:
-        if str(call.from_user.id) not in config.admin_list:
+        if not is_admin(call.from_user.id):
             await call.answer("No rights", show_alert=True)
             return
         _, user_id_str = call.data.split(":", 1)
@@ -1782,13 +2010,20 @@ async def main():
     dp.message.middleware(ThrottlingMiddleware())
 
     dp.message.register(welcome, Command(commands="start"))
+    dp.message.register(admin_panel_command, Command(commands=["admin", "panel"]))
     dp.message.register(start_mail, Command(commands="mail"))
     dp.message.register(admin_do_refund, Command(commands="dorefund"))
     dp.message.register(balance_command, Command(commands=["balance", "topup"]))
     dp.message.register(admin_add_balance, Command(commands="addbalance"))
     dp.message.register(admin_show_balance, Command(commands="getbalance"))
-    dp.message.register(cancel_download_command, Command(commands="cancel"))
+    # Panel prompts sit above /cancel on purpose: inside a prompt, /cancel must
+    # abort the prompt rather than be read as the download-cancel command.
+    dp.message.register(admin_set_balance_input, AdminState.set_balance)
+    dp.message.register(admin_ban_input, AdminState.ban)
+    dp.message.register(admin_refund_input, AdminState.refund)
     dp.message.register(confirm_mail, CatchMessageState.message)
+    dp.message.register(cancel_download_command, Command(commands="cancel"))
+    dp.callback_query.register(admin_callback, F.data.startswith("admin:"))
     dp.callback_query.register(mailer, F.data.startswith("mailer"))
     dp.callback_query.register(youtube_download, F.data.startswith("youtube_download"))
     dp.callback_query.register(refund_handler, F.data.startswith("refund:"))

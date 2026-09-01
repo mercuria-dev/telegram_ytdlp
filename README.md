@@ -19,7 +19,7 @@ Features:
 - Optional Telegram Stars payments (separate prices for regular / age-restricted YouTube / other services).
 - Optional star balance: top up once (10/50/100/200/500/1000 ⭐) and paid downloads are debited from it; without a balance they are billed per download as before. Failed or cancelled downloads are refunded automatically either way.
 - Optional self-hosted Telegram Bot API server for uploads up to 2 GB.
-- Admin broadcast, refunds, link logging with a ban button, automatic DB backups.
+- Inline admin panel (`/admin`): broadcast, set a user's balance, ban, refund, stats. Link logging with a ban button, automatic DB backups.
 - Inline mode (`@your_bot <link>`), `/cancel` for active downloads.
 
 # ⚙️ Setup
@@ -223,6 +223,17 @@ The official Bot API limits uploads to 50 MB. A self-hosted server raises it to 
 - Inline: `@your_bot <link>` in any chat.
 
 **Admins** (IDs from `ADMIN_LIST`)
+
+- `/admin` (or `/panel`, or the *Admin panel* button on `/start`) — inline admin panel:
+  - **Broadcast** — send a message (text/photo/video/animation, formatting preserved) to every user, with a confirmation step.
+  - **Set balance** — overwrite a user's star balance: send `user_id amount`, or `user_id` alone to look it up. The ledger records the difference, and the user is notified.
+  - **Ban user** — send a `user_id` to ban them in `CHANNEL_ID`.
+  - **Refund** — send a `payment_id` or `charge_id` to refund a Stars payment.
+  - **Stats** — users, active downloads, balance holders, stars held and paid, refunds.
+
+  Inside any prompt, `/cancel` or the *Cancel* button returns to the panel.
+
+The equivalent commands still work directly:
 
 - `/mail` — broadcast a message (text/media, HTML formatting preserved) to all users. Send `/cancel` to abort.
 - `/dorefund <payment_id_or_charge_id>` — refund a Stars payment. Refunding a top-up takes the stars back off the balance first, and is refused if they've already been spent.
