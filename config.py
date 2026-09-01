@@ -21,6 +21,9 @@ api_hash = os.getenv('API_HASH')
 admin_list = os.getenv('ADMIN_LIST').split(",")
 stars_price = int(os.getenv('STARS_PRICE', '1'))
 stars_premium_price = int(os.getenv('STARS_PREMIUM_PRICE', '5'))
+# Highest video resolution that stays free for regular users. Everything above
+# it (including odd heights like 640p/854p/1024p) costs STARS_PRICE.
+free_max_height = int(os.getenv('FREE_MAX_HEIGHT', '480'))
 # Paid downloads for non-YouTube services (SoundCloud/TikTok/Instagram/Pinterest/VK/X).
 # Enabled by default. Set PAID_OTHER_SERVICES=0 to keep them free.
 paid_other_services = os.getenv('PAID_OTHER_SERVICES', '1').lower() in ('1', 'true', 'yes')

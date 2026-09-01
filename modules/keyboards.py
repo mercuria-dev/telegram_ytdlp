@@ -22,6 +22,31 @@ EMOJI = {
 }
 
 
+def quality_height(note) -> int | None:
+    """Height in pixels behind a quality note like "720p"/"640p"/720. None for audio."""
+    if note is None:
+        return None
+    text = str(note).strip().lower()
+    if not text or text == "audio":
+        return None
+    try:
+        return int(text.rstrip("p"))
+    except ValueError:
+        return None
+
+
+def is_paid_quality(note) -> bool:
+    """True for any video quality above the free ceiling (FREE_MAX_HEIGHT, 480p).
+
+    Matching by height instead of a "720p"/"1080p" whitelist keeps odd
+    resolutions (640p, 854p, 1024p) from slipping through as free.
+    """
+    height = quality_height(note)
+    if height is None:
+        return False
+    return height > int(getattr(config, "free_max_height", 480) or 0)
+
+
 def tg_emoji_html(emoji_id: str, fallback: str) -> str:
     return f"<tg-emoji emoji-id=\"{emoji_id}\">{fallback}</tg-emoji>"
 
@@ -260,18 +285,15 @@ def youtube_formats_kb(
             return f"{base_text} ({effective_price}⭐)"
         if free:
             return base_text
-        if (is_audio or base_text in {"720p", "1080p"}) and config.stars_price > 0:
+        if (is_audio or is_paid_quality(base_text)) and config.stars_price > 0:
             return f"{base_text} ({config.stars_price}⭐)"
         return base_text
 
     def note_for(f: dict) -> str | None:
         note = f.get("format_note")
         if isinstance(note, str) and note and note not in ("N/A", "Default", "Premium"):
-            try:
-                int(note.rstrip("p"))
+            if quality_height(note) is not None:
                 return note
-            except Exception:
-                pass
 
         h = f.get("height")
         if h:
@@ -290,7 +312,7 @@ def youtube_formats_kb(
             if not note:
                 continue
 
-            if int(note.rstrip("p")) > 1080:
+            if (quality_height(note) or 0) > 1080:
                 continue
 
             size = int(f.get("filesize") or f.get("filesize_approx") or 0)
@@ -315,7 +337,7 @@ def youtube_formats_kb(
         )
         return kb.as_markup()
 
-    sorted_notes = sorted(best_by_note.items(), key=lambda kv: int(kv[0].rstrip("p")))
+    sorted_notes = sorted(best_by_note.items(), key=lambda kv: quality_height(kv[0]) or 0)
 
     rows: list[tuple[str, str, str | None]] = []
     for note, f in sorted_notes:

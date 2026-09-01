@@ -303,8 +303,13 @@ def is_admin(user_id) -> bool:
 def is_free_whitelisted_user(user_id: int) -> bool:
     return str(user_id) in {s.strip() for s in config.free_whitelist if s.strip()}
 
+
+def is_free_user(user_id: int) -> bool:
+    """Whitelist and admins never pay."""
+    return is_free_whitelisted_user(user_id) or is_admin(user_id)
+
 def other_services_price_for_user(user_id: int) -> int:
-    if is_free_whitelisted_user(user_id):
+    if is_free_user(user_id):
         return 0
     if not getattr(config, 'paid_other_services', True):
         return 0
@@ -557,8 +562,7 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             await call.answer("File is too large. Try another")
         return 
 
-    _wl = {s.strip() for s in config.free_whitelist if s.strip()}
-    is_whitelisted = str(call.from_user.id) in _wl
+    is_whitelisted = is_free_user(call.from_user.id)
     if is_whitelisted:
         requires_payment = False
         item_price = 0
@@ -568,7 +572,9 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             requires_payment = item_price > 0
         else:
             item_price = config.stars_price
-            requires_payment = item_price > 0 and ((format == "audio") or (note in ("720p", "1080p")))
+            # Everything above the free ceiling is paid, whatever the exact
+            # height is - 640p/854p/1024p used to slip through for free.
+            requires_payment = item_price > 0 and ((format == "audio") or is_paid_quality(note))
 
     if call.message:
         try:
@@ -846,8 +852,7 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     public_ok = False
                 premium_mode = not public_ok
                 await state.update_data(premium=premium_mode)
-                _wl = {s.strip() for s in config.free_whitelist if s.strip()}
-                is_whitelisted = str(message.from_user.id) in _wl
+                is_whitelisted = is_free_user(message.from_user.id)
                 premium_price_enabled = config.stars_premium_price > 0
                 standard_price_enabled = config.stars_price > 0
                 free_user = is_whitelisted or (premium_mode and not premium_price_enabled) or ((not premium_mode) and not standard_price_enabled)
