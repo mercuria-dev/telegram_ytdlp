@@ -17,7 +17,7 @@ Features:
 - Auto-downloads the latest `yt-dlp` binaries into `dlp/` on startup (stable or nightly channel).
 - Optional channel-subscription gate (`CHANNEL_ID`) with extra "subscribe" buttons.
 - Optional Telegram Stars payments (separate prices for regular / age-restricted YouTube / other services).
-- Star balance: users top up once (10/50/100/200/500/1000 ⭐) and paid downloads are debited automatically. Stars are refunded to the balance on their own if a download fails or is cancelled.
+- Optional star balance: top up once (10/50/100/200/500/1000 ⭐) and paid downloads are debited from it; without a balance they are billed per download as before. Failed or cancelled downloads are refunded automatically either way.
 - Optional self-hosted Telegram Bot API server for uploads up to 2 GB.
 - Admin broadcast, refunds, link logging with a ban button, automatic DB backups.
 - Inline mode (`@your_bot <link>`), `/cancel` for active downloads.
@@ -95,12 +95,14 @@ All variables are listed below. Only **Required** ones are needed to start; ever
 | `PAID_OTHER_SERVICES`        | no       | `1`                  | `1` — charge Stars for Instagram/TikTok/Pinterest/VK/X/SoundCloud; `0` — keep them free. |
 | `OTHER_SERVICES_STARS_PRICE` | no       | same as `STARS_PRICE` | Price in ⭐ for non-YouTube services |
 | `FREE_WHITELIST`             | no       | —                    | User IDs that never pay: `123,456` |
-| `BALANCE_ENABLED`            | no       | `1`                  | `1` — users can keep a star balance and paid downloads are debited from it; `0` — invoice for every download (old behaviour). |
+| `BALANCE_ENABLED`            | no       | `1`                  | `1` — offer an optional star balance and debit paid downloads from it when it covers the price; `0` — hide it and invoice every download. |
 | `STARS_TOPUP_OPTIONS`        | no       | `10,50,100,200,500,1000` | Top-up amounts in ⭐ offered as buttons under `/balance`. |
 
-**How the balance works.** Stars buy balance, and the balance buys downloads — there is no per-download invoice. `/balance` (or the *My balance* button on `/start`) shows the balance and the top-up buttons. When a download costs stars the price is debited and the download starts right away; if the balance can't cover it the bot asks for a top-up instead of charging. If the download then fails or is cancelled, the stars are returned to the balance automatically — no button to press. A top-up itself can be refunded in full as long as it hasn't been spent yet.
+**How the balance works.** The balance is optional and never blocks anything. When a download costs stars the bot tries the balance first: if it covers the price, the stars are debited and the download starts right away with no invoice to confirm. If the balance can't cover it, Telegram bills that single download exactly as it did before — the user is not asked to top up. `/balance` (or the *My balance* button on `/start`) is where topping up lives.
 
-Set `BALANCE_ENABLED=0` to turn the balance off entirely and go back to an invoice per download.
+**Refunds are automatic.** A download that fails, is cancelled, or dies with the bot gives the stars back on its own: to the balance if that is what paid, otherwise through Telegram's `refundStarPayment`. A manual refund button is only attached when the automatic refund could not go through. A top-up itself can be refunded in full as long as it hasn't been spent yet.
+
+Set `BALANCE_ENABLED=0` to hide the balance entirely and bill every download through Telegram.
 
 ### /start appearance
 

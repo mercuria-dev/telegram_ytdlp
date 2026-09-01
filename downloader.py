@@ -527,35 +527,93 @@ def select_cookiefile(url_or_domain: str | None) -> str | None:
     except Exception:
         return None
 
-def auto_refund_to_balance(payment_payload: str | None) -> str | None:
-    """Give a balance spend back automatically when its download didn't happen.
+def _refund_star_payment_sync(user_id: int, charge_id: str) -> bool:
+    """Call Telegram's refundStarPayment. Runs in a download thread, so no asyncio."""
+    try:
+        resp = requests.post(
+            f"{config.telegram_api_base}/bot{config.bot_token}/refundStarPayment",
+            json={"user_id": user_id, "telegram_payment_charge_id": charge_id},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            print(f"refundStarPayment HTTP {resp.status_code}: {resp.text[:300]}")
+            return False
+        data = resp.json()
+        if not data.get('ok'):
+            print(f"refundStarPayment failed: {data}")
+            return False
+        return True
+    except Exception as e:
+        print(f"refundStarPayment error: {e}")
+        return False
 
-    `payment_payload` is the `bal:<user_id>:<amount>:<nonce>` ref created when the
-    stars were debited. Returns a line to append to the user's message, or None if
-    there was nothing to refund (free download, or a legacy invoice payment).
 
-    Safe to call more than once for the same ref: the ledger refunds it only once.
-    """
-    payload_str = str(payment_payload or '')
-    if not payload_str.startswith('bal:'):
-        return None
+def _refund_balance_spend(payload_str: str) -> tuple[str | None, bool]:
+    """Return a balance spend. -> (note, settled) — see auto_refund_payment."""
     try:
         ok, reason, new_balance = db.refund_balance_spend(payload_str)
     except Exception as e:
-        print(f"auto_refund_to_balance error: {e}")
-        return None
-
+        print(f"_refund_balance_spend error: {e}")
+        return None, True
     try:
         amount = int(payload_str.split(':')[2])
     except (IndexError, ValueError):
         amount = 0
-
     if ok:
-        return f"\n\n↩️ {amount} ⭐ refunded to your balance. Balance: {new_balance} ⭐"
+        return f"\n\n↩️ {amount} ⭐ refunded to your balance. Balance: {new_balance} ⭐", True
     if reason == "Already refunded":
-        return None
-    print(f"auto_refund_to_balance failed for {payload_str}: {reason}")
-    return f"\n\n⚠️ Couldn't refund {amount} ⭐ automatically ({reason}). Please contact the admin."
+        return None, True
+    # A manual button would run this same code, so offering one wouldn't help.
+    print(f"Balance refund failed for {payload_str}: {reason}")
+    return f"\n\n⚠️ Couldn't refund {amount} ⭐ automatically ({reason}). Please contact the admin.", True
+
+
+def _refund_invoice_payment(payload_str: str) -> tuple[str | None, bool]:
+    """Refund a per-download Telegram Stars invoice. -> (note, settled)."""
+    try:
+        record = db.get_payment_by_payload(payload_str)
+    except Exception as e:
+        print(f"Payment lookup failed for {payload_str}: {e}")
+        return None, False
+    if not record:
+        # Nothing was charged through Telegram for this download.
+        return None, False
+
+    _pid, user_id, _payload, charge_id, status, amount = record
+    if status == 'refunded':
+        return None, True
+    if not charge_id:
+        return None, False
+
+    if not _refund_star_payment_sync(user_id, charge_id):
+        # Leave a manual refund button so the user can retry.
+        return None, False
+
+    try:
+        db.mark_payment_refunded(payload_str)
+    except Exception as e:
+        print(f"mark_payment_refunded failed for {payload_str}: {e}")
+    return f"\n\n↩️ {int(amount or 0)} ⭐ refunded to Telegram.", True
+
+
+def auto_refund_payment(payment_payload: str | None) -> tuple[str | None, bool]:
+    """Undo the payment for a download that didn't deliver a file.
+
+    Balance spends (`bal:<user_id>:<amount>:<nonce>`) go back to the balance;
+    anything else was a Telegram Stars invoice and is refunded through Telegram.
+
+    Returns (note, settled): `note` is a line to append to the user's message,
+    `settled` says whether the payment is dealt with — when it's False the caller
+    should still offer a manual refund button.
+
+    Safe to call repeatedly for the same payment: both paths refund only once.
+    """
+    payload_str = str(payment_payload or '')
+    if not payload_str:
+        return None, True
+    if payload_str.startswith('bal:'):
+        return _refund_balance_spend(payload_str)
+    return _refund_invoice_payment(payload_str)
 
 
 def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | None = None) -> bool:
@@ -569,22 +627,23 @@ def bot_api_send_message(chat_id: int | str, text: str, payment_payload: str | N
             'text': text,
             'disable_web_page_preview': 'true'
         }
-        payload_str = str(payment_payload or '')
-        if payload_str.startswith('bal:'):
-            note = auto_refund_to_balance(payload_str)
+        if payment_payload:
+            payload_str = str(payment_payload)
+            note, settled = auto_refund_payment(payload_str)
             if note:
                 data['text'] += note
-        elif payment_payload:
-            pay_price = config.stars_premium_price if ':prem' in payload_str else config.stars_price
-            reply_markup = {
-                "inline_keyboard": [[
-                    {
-                        "text": f"🔄 Refund {pay_price}⭐",
-                        "callback_data": f"refund:{payment_payload}",
-                    }
-                ]]
-            }
-            data['reply_markup'] = json.dumps(reply_markup)
+            if not settled:
+                # Automatic refund didn't go through — let the user trigger it.
+                pay_price = config.stars_premium_price if ':prem' in payload_str else config.stars_price
+                reply_markup = {
+                    "inline_keyboard": [[
+                        {
+                            "text": f"🔄 Refund {pay_price}⭐",
+                            "callback_data": f"refund:{payment_payload}",
+                        }
+                    ]]
+                }
+                data['reply_markup'] = json.dumps(reply_markup)
         if len(data['text']) > 3500:
             data['text'] = data['text'][:3500] + "..."
         resp = requests.post(url, data=data, timeout=30)
@@ -1124,12 +1183,11 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
             if download_info and download_info[7] == 'cancelled':  # status field
                 # Загрузка была отменена
                 final_status = "cancelled"
-                # No file was delivered, so give any charged stars back.
-                refund_note = auto_refund_to_balance(payment_payload)
                 if start_message_id:
                     update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Загрузка отменена пользователем.")
-                if refund_note:
-                    bot_api_send_message(chat_id, f"Download cancelled.{refund_note}")
+                # No file was delivered, so give any charged stars back.
+                if payment_payload:
+                    bot_api_send_message(chat_id, "Download cancelled.", payment_payload)
                 db.set_work(user_id_for_work or chat_id, 0)
                 delete_file(output_path)
                 return
@@ -1222,12 +1280,15 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         if start_message_id:
             delete_download_message(chat_id, start_message_id)
 
-        # Safety net for every exit path: nothing was delivered, so the stars go
-        # back. A no-op if an error branch above already refunded this ref.
-        if final_status != "completed":
-            note = auto_refund_to_balance(payment_payload)
+        # Safety net for every exit path: nothing was delivered, so the payment
+        # is undone. A no-op if an error branch above already settled it.
+        if final_status != "completed" and payment_payload:
+            note, settled = auto_refund_payment(payment_payload)
             if note:
                 bot_api_send_message(chat_id, f"Download didn't complete.{note}")
+            elif not settled:
+                # Still owed a refund — send one message that carries the button.
+                bot_api_send_message(chat_id, "Download didn't complete.", payment_payload)
 
         db.set_work(user_id_for_work or chat_id, 0)
         delete_file(output_path)
@@ -1469,12 +1530,11 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
             if download_info and download_info[7] == 'cancelled':  # status field
                 # Загрузка была отменена
                 final_status = "cancelled"
-                # No file was delivered, so give any charged stars back.
-                refund_note = auto_refund_to_balance(payment_payload)
                 if start_message_id:
                     update_download_message(chat_id, start_message_id, f"{tge('no', '❌')} Загрузка отменена пользователем.")
-                if refund_note:
-                    bot_api_send_message(chat_id, f"Download cancelled.{refund_note}")
+                # No file was delivered, so give any charged stars back.
+                if payment_payload:
+                    bot_api_send_message(chat_id, "Download cancelled.", payment_payload)
                 db.set_work(user_id_for_work or chat_id, 0)
                 delete_file(output_path)
                 return
@@ -1555,12 +1615,15 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
         if start_message_id:
             delete_download_message(chat_id, start_message_id)
         
-        # Safety net for every exit path: nothing was delivered, so the stars go
-        # back. A no-op if an error branch above already refunded this ref.
-        if final_status != "completed":
-            note = auto_refund_to_balance(payment_payload)
+        # Safety net for every exit path: nothing was delivered, so the payment
+        # is undone. A no-op if an error branch above already settled it.
+        if final_status != "completed" and payment_payload:
+            note, settled = auto_refund_payment(payment_payload)
             if note:
                 bot_api_send_message(chat_id, f"Download didn't complete.{note}")
+            elif not settled:
+                # Still owed a refund — send one message that carries the button.
+                bot_api_send_message(chat_id, "Download didn't complete.", payment_payload)
 
         db.set_work(user_id_for_work or chat_id, 0)
         try:
