@@ -1063,7 +1063,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
             ydl_opts['cookiefile'] = ck_all
         if domain == "instagram.com":
             ydl_opts['quiet'] = True
-        elif domain.startswith("youtu"):
+        elif _is_youtube(url or domain):
             try:
                 ck = select_cookiefile(url)
                 try:
@@ -1128,7 +1128,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         if ck_all:
             args = ['--cookies', ck_all] + args
         args += _yt_dlp_runtime_args()
-        if domain and domain.startswith('youtu'):
+        if _is_youtube(url or domain):
             args += _youtube_extractor_args()
 
         # Запускаем процесс с возможностью отмены
@@ -1309,7 +1309,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             ydl_opts['cookiefile'] = ck_all
         if domain == "instagram.com":
             ydl_opts['quiet'] = True
-        elif domain.startswith("youtu"):
+        elif _is_youtube(url or domain):
             try:
                 ck = select_cookiefile(url)
                 try:
@@ -1375,7 +1375,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
         if ck_all:
             args = ['--cookies', ck_all] + args
         args += _yt_dlp_runtime_args()
-        if domain and domain.startswith('youtu'):
+        if _is_youtube(url or domain):
             args += _youtube_extractor_args()
 
         max_retries = 3
