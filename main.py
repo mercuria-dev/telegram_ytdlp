@@ -191,6 +191,22 @@ def looks_like_image_url(url: str | None) -> bool:
     u = url.lower().split("?", 1)[0]
     return any(u.endswith(ext) for ext in IMAGE_EXTS)
 
+# VK hosts that serve the regular video/clip player and can be handled as vk.com.
+VK_VIDEO_HOSTS = {
+    "vk.com", "m.vk.com", "new.vk.com",
+    "vkvideo.ru", "m.vkvideo.ru", "new.vkvideo.ru", "vksport.vkvideo.ru",
+}
+
+def normalize_vk_link(link: str, domain: str | None) -> tuple[str, str | None]:
+    """Rewrite VK mobile/mirror hosts (m.vk.com, vkvideo.ru, m.vkvideo.ru, ...) to vk.com."""
+    d = (domain or "").lower()
+    if d not in VK_VIDEO_HOSTS or d == "vk.com":
+        return link, domain
+    idx = link.lower().find(d)
+    if idx == -1:
+        return link, domain
+    return link[:idx] + "vk.com" + link[idx + len(d):], "vk.com"
+
 def is_supported_domain(domain: str | None) -> bool:
     if not domain:
         return False
@@ -201,7 +217,7 @@ def is_supported_domain(domain: str | None) -> bool:
         return True
     if ("x.com" in d) or ("twitter.com" in d):
         return True
-    if (d == "vk.com") or ("vkvideo.ru" in d):
+    if (d in VK_VIDEO_HOSTS) or ("vkvideo.ru" in d):
         return True
     return False
 
@@ -325,7 +341,7 @@ def service_display_name(domain: str | None) -> str:
         return 'Instagram'
     if 'pinterest' in d:
         return 'Pinterest'
-    if d == 'vk.com' or 'vkvideo.ru' in d:
+    if d in VK_VIDEO_HOSTS or 'vkvideo.ru' in d:
         return 'VK'
     if d in {'x.com', 'twitter.com'} or 'twitter.com' in d:
         return 'X / Twitter'
@@ -708,16 +724,12 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
             if domain and 'youtu' in domain and is_youtube_playlist_like(link):
                 await message.answer("Please send a direct video link without the list= parameter (playlists are ignored).")
                 return
+            link, domain = normalize_vk_link(link, domain)
             if domain == "vk.com":
                 if link.find("vk.com/video") == -1 and link.find("vk.com/clip") == -1:
                     return
                 if link.find("@") > -1:
                     return
-            elif domain == "vkvideo.ru":
-                if link.find("@") > -1:
-                    return
-                link = link.replace("vkvideo.ru", "vk.com")
-                domain = "vk.com"
             _, work = db.get_user(message.from_user.id)
             if work == 1:
                 await message.answer("Wait while your video is downloading")
@@ -1706,6 +1718,7 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
         return
     link = m.group(1)
     domain = get_domain(link)
+    link, domain = normalize_vk_link(link, domain)
     title = 'No name'
     thumb_url = None
     kb = None
