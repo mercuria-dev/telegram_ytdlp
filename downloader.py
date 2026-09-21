@@ -1,5 +1,6 @@
 
 import os
+import sys
 import subprocess
 import shutil
 import signal
@@ -262,10 +263,29 @@ def _yt_dlp_runtime_args() -> list[str]:
         return []
 
 
+def _yt_dlp_cmd(args_list) -> list[str]:
+    """Build the yt-dlp command line.
+
+    The dlp/ downloads are zipimport scripts with a `#!/usr/bin/env python3`
+    shebang, so optional deps (curl_cffi -> TikTok impersonation) come from
+    whichever interpreter PATH happens to resolve. Run them with our own
+    interpreter instead, so the venv's packages are always used.
+    """
+    exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
+    try:
+        if os.path.isfile(exe):
+            with open(exe, 'rb') as fh:
+                shebang = fh.readline(128)
+            if shebang.startswith(b'#!') and b'python' in shebang:
+                return [sys.executable, exe] + list(args_list)
+    except Exception:
+        pass
+    return [exe] + list(args_list)
+
+
 def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: bool = False):
     # Prefer selected executable from dlp_manager (dlp/ folder). Falls back to system `yt-dlp`.
-    exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
-    cmd = [exe] + args_list
+    cmd = _yt_dlp_cmd(args_list)
     logger = _get_ytdlp_logger()
     cmd_str = _cmd_to_str(_sanitize_cmd_for_logging(cmd))
     if capture_output:
@@ -316,8 +336,7 @@ def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: b
 
 
 def run_yt_dlp_process_with_pid(args_list, download_id: str = None):
-    exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
-    cmd = [exe] + args_list
+    cmd = _yt_dlp_cmd(args_list)
     logger = _get_ytdlp_logger()
     cmd_str = _cmd_to_str(_sanitize_cmd_for_logging(cmd))
     logger.info("yt-dlp start%s: %s", f" download_id={download_id}" if download_id else "", cmd_str)
@@ -748,31 +767,208 @@ def crop_to_square(image_path, out_path):
         img = img.crop((left, top, right, bottom))
         img.save(out_path)
 
-def sanitize_filename(text):
+_MEDIA_EXTS = ('.mp3', '.m4a', '.opus', '.ogg', '.oga', '.wav', '.flac', '.aac',
+               '.mp4', '.mkv', '.webm', '.mov', '.avi', '.ts')
+# Bidi/zero-width marks: they survive in titles, break filename matching and
+# confuse the Bot API multipart filename.
+_BIDI_RE = re.compile('[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]')
+
+
+def _trim_to_bytes(text, max_bytes=150):
+    """Cut a name to a byte budget (yt-dlp trims names to fit the filesystem)."""
+    return text.encode('utf-8')[:max_bytes].decode('utf-8', 'ignore').strip()
+
+
+def sanitize_filename(text, max_bytes=150):
     if not text:
         return ""
     sanitized_text = text.strip()
+    sanitized_text = _BIDI_RE.sub('', sanitized_text)
     sanitized_text = re.sub(r'[\\/:"*?<>|]+', '', sanitized_text)
     sanitized_text = re.sub(r'%+', '', sanitized_text)
-    sanitized_text = re.sub(r'[\x00-\x1f]', '', sanitized_text)
-    sanitized_text = re.sub(r'\s+', ' ', sanitized_text)
-    return sanitized_text[:200].strip()
+    sanitized_text = re.sub(r'[\x00-\x1f\x7f]', '', sanitized_text)
+    sanitized_text = re.sub(r'\s+', ' ', sanitized_text).strip()
+    # Titles that already end with a media extension (common on SoundCloud)
+    # would otherwise give doubled extensions like "name.mp3.mp3".
+    root, ext = os.path.splitext(sanitized_text)
+    if ext.lower() in _MEDIA_EXTS and root.strip():
+        sanitized_text = root.strip()
+    sanitized_text = _trim_to_bytes(sanitized_text.rstrip(' .'), max_bytes)
+    return sanitized_text.rstrip(' .')
+
+
+def _match_key(text):
+    """Normalised key used to match our expected name against what yt-dlp wrote."""
+    return re.sub(r'[^0-9a-z\u0400-\u04ff\u0600-\u06ff]+', '', (text or '').lower())
+
+
+def find_produced_file(expected_path, exts=('.mp3',), since=None, directory='downloads'):
+    """Locate the file yt-dlp actually produced when it differs from expected_path.
+
+    yt-dlp applies its own sanitising/truncation, so titles with RTL text,
+    unicode or a trailing ".mp3" can land under a slightly different name.
+    """
+    if expected_path and os.path.isfile(expected_path):
+        return expected_path
+    if not expected_path:
+        return None
+    exts = tuple(e.lower() for e in (exts or ()))
+    base = os.path.splitext(expected_path)[0]
+    for cand in [base + e for e in exts] + [base] + [expected_path + e for e in exts]:
+        if cand and os.path.isfile(cand):
+            return cand
+    directory = os.path.dirname(expected_path) or directory
+    target = _match_key(os.path.basename(base))
+    scored = []
+    try:
+        names = os.listdir(directory)
+    except Exception:
+        return None
+    for name in names:
+        path = os.path.join(directory, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            if exts and not name.lower().endswith(exts):
+                continue
+            mtime = os.path.getmtime(path)
+        except Exception:
+            continue
+        if since and mtime < since - 5:
+            continue
+        key = _match_key(os.path.splitext(name)[0])
+        common = len(os.path.commonprefix([target, key])) if (target and key) else 0
+        scored.append((common, mtime, path))
+    if not scored:
+        return None
+    common, _mtime, path = max(scored)
+    # Require a real name match: "downloads" is shared between concurrent
+    # downloads, we must never hand another user's file over.
+    if common >= 6 or (common >= 3 and len(target) <= 8):
+        return path
+    return None
+
+
+_TRANSLIT = {
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e', 'ж': 'zh',
+    'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
+    'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'ts',
+    'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu',
+    'я': 'ya', 'ї': 'i', 'і': 'i', 'є': 'e', 'ґ': 'g',
+}
+
+
+def _ascii_safe_name(name):
+    name = ''.join(_TRANSLIT.get(c, _TRANSLIT.get(c.lower(), c)) if not c.isascii() else c
+                   for c in name)
+    try:
+        import unicodedata
+        name = unicodedata.normalize('NFKD', name)
+    except Exception:
+        pass
+    out = ''.join(c if (c.isalnum() and ord(c) < 128) or c in ' -_' else '_' for c in name)
+    out = re.sub(r'[_\s]+', '_', out).strip('_ .')
+    return out
+
+
+def repair_file_name(path, short=False):
+    """Rename a file to an ASCII-safe name so uploads can be retried."""
+    if not path or not os.path.isfile(path):
+        return None
+    dirname = os.path.dirname(path) or '.'
+    root, ext = os.path.splitext(os.path.basename(path))
+    ext = ext.lower()
+    new_root = _ascii_safe_name(root)[:60].strip('_ .')
+    if short or len(new_root) < 3:
+        new_root = f"file_{random.randint(100000, 999999)}"
+    new_path = os.path.join(dirname, new_root + ext)
+    if new_path == path:
+        return path
+    try:
+        if os.path.exists(new_path):
+            new_path = os.path.join(dirname, f"{new_root}_{random.randint(100, 999)}{ext}")
+        os.replace(path, new_path)
+        return new_path
+    except Exception:
+        return None
+
+
+def _clean_text_field(value, limit=1000):
+    text = _BIDI_RE.sub('', str(value))
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+    return text[:limit]
+
+
+def _clean_extra(extra):
+    if not extra:
+        return extra
+    cleaned = dict(extra)
+    for key in ('caption', 'title', 'performer'):
+        if cleaned.get(key):
+            cleaned[key] = _clean_text_field(cleaned[key])
+    return cleaned
+
+
+def send_file_with_repair(method, file_field, file_path, chat_id, extra=None, thumb=None,
+                          exts=('.mp3',), since=None, attempts=3):
+    """Send a file, repairing the path/name between attempts.
+
+    Handles the two ways an upload dies on odd titles: the produced file is not
+    where we expected it (yt-dlp renamed/truncated it), or the name itself upsets
+    the upload. Returns the path that was actually sent.
+    """
+    path = file_path
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        if not os.path.isfile(path):
+            resolved = find_produced_file(path, exts=exts, since=since)
+            if resolved:
+                print(f"Resolved missing upload target: {path} -> {resolved}")
+                path = resolved
+        if not os.path.isfile(path):
+            last_exc = FileNotFoundError(f"No such file or directory: '{path}'")
+        else:
+            try:
+                bot_api_send_file(method, file_field, path, chat_id,
+                                  extra=_clean_extra(extra), thumb=thumb)
+                return path
+            except Exception as e:
+                last_exc = e
+                print(f"Send attempt {attempt} failed for {path}: {e}")
+        if attempt < attempts:
+            repaired = repair_file_name(path, short=(attempt >= 2))
+            if repaired:
+                print(f"Retrying upload with repaired name: {repaired}")
+                path = repaired
+            if thumb and not os.path.isfile(thumb):
+                thumb = None
+            time.sleep(1)
+    # Give the caller's cleanup something it can still find
+    if path != file_path and os.path.isfile(path):
+        try:
+            os.replace(path, file_path)
+        except Exception:
+            delete_file(path)
+    raise last_exc if last_exc else RuntimeError('upload failed')
 
 def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment_payload=None, user_id_for_work=None, session_id=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    produced_mp3 = None
     try:
         if not output_path.lower().endswith('.mp3'):
             output_path = output_path + '.mp3'
 
         base_name = os.path.basename(output_path)
         base_no_ext = os.path.splitext(base_name)[0]
-        safe_base = sanitize_filename(base_no_ext)
+        safe_base = sanitize_filename(base_no_ext) or f"audio_{random.randint(100000, 999999)}"
         outtmpl = os.path.join('downloads', safe_base)
 
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': outtmpl,
+            # ".%(ext)s" keeps yt-dlp from treating a dot inside the title as the
+            # extension, so the converted file really lands on "<base>.mp3"
+            'outtmpl': outtmpl + '.%(ext)s',
             'writethumbnail': True,
             'noprogress': True,
             'quiet': True,
@@ -782,6 +978,7 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
 
         max_retries = 3
         last_exc = None
+        dl_started = time.time()
         # Build base args
         args = []
         if ydl_opts.get('format'):
@@ -838,10 +1035,10 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                 except Exception:
                     audio_thumb = thumb
 
-        produced_mp3 = outtmpl + '.mp3'
+        produced_mp3 = find_produced_file(outtmpl + '.mp3', exts=('.mp3',), since=dl_started) or (outtmpl + '.mp3')
         # Upload via Bot API server (supports files up to 2GB on a local server)
         try:
-            bot_api_send_file(
+            produced_mp3 = send_file_with_repair(
                 'sendAudio', 'audio', produced_mp3, chat_id,
                 extra={
                     'caption': f"{tge('gem', '💎')} <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>",
@@ -849,6 +1046,7 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
                     'title': safe_base,
                 },
                 thumb=audio_thumb,
+                exts=('.mp3',), since=dl_started,
             )
         except Exception as e:
             print(f"Failed to send audio: {e}")
@@ -856,6 +1054,7 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
             db.set_work(user_id_for_work or chat_id, 0)
             try:
                 delete_file(output_path)
+                delete_file(produced_mp3)
             except Exception:
                 pass
             return
@@ -869,6 +1068,8 @@ def download_audio(video_url, output_path, chat_id, thumb, bot_username, payment
     db.set_work(user_id_for_work or chat_id, 0)
     try:
         delete_file(output_path)
+        if produced_mp3:
+            delete_file(produced_mp3)
     except Exception:
         pass
 
@@ -932,8 +1133,7 @@ def _run_list_formats_for_logs(url, domain, ck=None):
             lf_args += _youtube_extractor_args()
         lf_args += [url]
         
-        exe = getattr(config, 'yt_dlp_executable', None) or dlp_manager.get_selected_executable() or 'yt-dlp'
-        cmd = [exe] + lf_args
+        cmd = _yt_dlp_cmd(lf_args)
 
         logger = _get_ytdlp_logger()
         logger.info("yt-dlp list-formats: %s", _cmd_to_str(_sanitize_cmd_for_logging(cmd)))
@@ -987,7 +1187,11 @@ def get_domain(url):
     return None
 
 def delete_file(f_path):
+    if not f_path:
+        return
     for _ in range(5):
+        if not os.path.exists(f_path):
+            return
         try:
             os.remove(f_path)
             break
@@ -1063,7 +1267,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
             ydl_opts['cookiefile'] = ck_all
         if domain == "instagram.com":
             ydl_opts['quiet'] = True
-        elif domain.startswith("youtu"):
+        elif _is_youtube(url or domain):
             try:
                 ck = select_cookiefile(url)
                 try:
@@ -1128,10 +1332,11 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         if ck_all:
             args = ['--cookies', ck_all] + args
         args += _yt_dlp_runtime_args()
-        if domain and domain.startswith('youtu'):
+        if _is_youtube(url or domain):
             args += _youtube_extractor_args()
 
         # Запускаем процесс с возможностью отмены
+        dl_started = time.time()
         proc = run_yt_dlp_process_with_pid(args + [url], download_id)
         
         # Читаем вывод процесса (и пишем в лог, чтобы при "Killed" остался контекст)
@@ -1238,7 +1443,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
 
         # Upload via Bot API server (supports files up to 2GB on a local server)
         try:
-            bot_api_send_file(
+            output_path = send_file_with_repair(
                 'sendVideo', 'video', output_path, chat_id,
                 extra={
                     'caption': title_orig or safe_base,
@@ -1247,6 +1452,7 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
                     'height': height or None,
                 },
                 thumb=norm_thumb,
+                exts=('.mp4', '.mkv', '.webm', '.mov'), since=dl_started,
             )
         except Exception as e:
             print(f"Failed to send video: {e}")
@@ -1309,7 +1515,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
             ydl_opts['cookiefile'] = ck_all
         if domain == "instagram.com":
             ydl_opts['quiet'] = True
-        elif domain.startswith("youtu"):
+        elif _is_youtube(url or domain):
             try:
                 ck = select_cookiefile(url)
                 try:
@@ -1375,11 +1581,12 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
         if ck_all:
             args = ['--cookies', ck_all] + args
         args += _yt_dlp_runtime_args()
-        if domain and domain.startswith('youtu'):
+        if _is_youtube(url or domain):
             args += _youtube_extractor_args()
 
         max_retries = 3
         last_exc = None
+        dl_started = time.time()
         for attempt in range(1, max_retries + 1):
             try:
                 run_yt_dlp_process(args + [url])
@@ -1420,7 +1627,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
 
         # Upload via Bot API server (supports files up to 2GB on a local server)
         try:
-            bot_api_send_file(
+            output_path = send_file_with_repair(
                 'sendVideo', 'video', output_path, chat_id,
                 extra={
                     'caption': title_orig or safe_base,
@@ -1429,6 +1636,7 @@ def simple_downloader(url, output_path, chat_id, domain, video_format=None, titl
                     'height': height or None,
                 },
                 thumb=norm_thumb,
+                exts=('.mp4', '.mkv', '.webm', '.mov'), since=dl_started,
             )
         except Exception as e:
             print(f"Failed to send video: {e}")
@@ -1464,6 +1672,8 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     final_status = "completed"
+    produced_mp3 = None
+    dl_started = time.time()
     
     start_message_id = None
     if download_id:
@@ -1480,12 +1690,14 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
 
         base_name = os.path.basename(output_path)
         base_no_ext = os.path.splitext(base_name)[0]
-        safe_base = sanitize_filename(base_no_ext)
+        safe_base = sanitize_filename(base_no_ext) or f"audio_{random.randint(100000, 999999)}"
         outtmpl = os.path.join('downloads', safe_base)
 
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': outtmpl,
+            # ".%(ext)s" keeps yt-dlp from treating a dot inside the title as the
+            # extension, so the converted file really lands on "<base>.mp3"
+            'outtmpl': outtmpl + '.%(ext)s',
             'writethumbnail': True,
             'noprogress': True,
             'quiet': True,
@@ -1510,6 +1722,7 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
             args += _youtube_extractor_args()
 
         # Запускаем процесс с возможностью отмены
+        dl_started = time.time()
         proc = run_yt_dlp_process_with_pid(args + [video_url], download_id)
         
         # Читаем вывод процесса
@@ -1579,10 +1792,10 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                 except Exception:
                     audio_thumb = thumb
 
-        produced_mp3 = outtmpl + '.mp3'
+        produced_mp3 = find_produced_file(outtmpl + '.mp3', exts=('.mp3',), since=dl_started) or (outtmpl + '.mp3')
         # Upload via Bot API server (supports files up to 2GB on a local server)
         try:
-            bot_api_send_file(
+            produced_mp3 = send_file_with_repair(
                 'sendAudio', 'audio', produced_mp3, chat_id,
                 extra={
                     'caption': f"{tge('gem', '💎')} <b><a href='https://t.me/{bot_username}'>@{bot_username}</a></b>",
@@ -1590,6 +1803,7 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
                     'title': safe_base,
                 },
                 thumb=audio_thumb,
+                exts=('.mp3',), since=dl_started,
             )
         except Exception as e:
             print(f"Failed to send audio: {e}")
@@ -1628,6 +1842,8 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
         db.set_work(user_id_for_work or chat_id, 0)
         try:
             delete_file(output_path)
+            if produced_mp3:
+                delete_file(produced_mp3)
         except Exception:
             pass
 
