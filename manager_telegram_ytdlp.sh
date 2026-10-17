@@ -1,117 +1,120 @@
 #!/bin/bash
 
 # Настройки для TELEGRAM YTDLP
-SERVICE_NAME="telegram_ytdlp-bot.service"
-SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
-USER_NAME="root"
-WORK_DIR="/root/telegram_ytdlp"
-EXEC_CMD="/bin/bash /root/telegram_ytdlp/restart_bot.sh"
+# Бот работает как пользовательский сервис systemd (systemctl --user), без root.
+SERVICE_NAME="telegram_ytdlp.service"
+SERVICE_DIR="${HOME}/.config/systemd/user"
+SERVICE_PATH="${SERVICE_DIR}/${SERVICE_NAME}"
+WORK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXEC_CMD="/bin/bash ${WORK_DIR}/restart_bot.sh"
+BOT_LOG="${WORK_DIR}/logs/bot.log"
 
-# Проверка на наличие sudo/root
-check_sudo() {
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "\e[31mОшибка: Для управления сервисом нужны права root (sudo).\e[0m"
-        echo "Запустите скрипт через: sudo ./manager_telegram_ytdlp.sh"
+# Пользовательские сервисы не видны из-под root, поэтому sudo не нужен и мешает
+check_not_root() {
+    if [ "$EUID" -eq 0 ]; then
+        echo -e "\e[31mОшибка: запускайте без sudo — сервис пользовательский (systemctl --user).\e[0m"
+        echo "Запустите скрипт через: bash manager_telegram_ytdlp.sh"
         exit 1
     fi
 }
 
 # 1. Создать и включить автостарт
 create_service() {
-    check_sudo
     echo -e "\e[34m[1/3] Создаем файл службы ${SERVICE_PATH}...\e[0m"
 
-    if [ ! -d "$WORK_DIR" ]; then
-        echo -e "\e[31mПредупреждение: Каталог проекта не найден: ${WORK_DIR}\e[0m"
+    if [ -f "$SERVICE_PATH" ]; then
+        echo -e "\e[33mСлужба уже существует, файл будет перезаписан.\e[0m"
     fi
 
-    # ВАЖНО: если этот проект сейчас запущен в screen — сначала остановите его,
-    # иначе будут работать два экземпляра бота одновременно (конфликт getUpdates).
-
+    mkdir -p "$SERVICE_DIR"
     cat <<EOF > "$SERVICE_PATH"
 [Unit]
 Description=Telegram yt-dlp bot
-After=network.target
+After=network-online.target docker.service
 
 [Service]
 Type=simple
-User=${USER_NAME}
 WorkingDirectory=${WORK_DIR}
 ExecStart=${EXEC_CMD}
 Restart=always
 RestartSec=10
+KillMode=control-group
+MemoryMax=2G
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 EOF
 
     echo -e "\e[34m[2/3] Обновляем конфигурацию systemd и включаем автостарт...\e[0m"
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
+    systemctl --user daemon-reload
+    systemctl --user enable "$SERVICE_NAME"
+    # Без linger пользовательские сервисы не стартуют при загрузке без входа в систему
+    if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
+        echo -e "\e[33mВключаем linger (нужен sudo один раз), чтобы бот стартовал при загрузке...\e[0m"
+        sudo loginctl enable-linger "$USER"
+    fi
 
     echo -e "\e[34m[3/3] Запускаем службу...\e[0m"
-    systemctl start "$SERVICE_NAME"
+    systemctl --user restart "$SERVICE_NAME"
     echo -e "\e[32mУспешно! Сервис TELEGRAM YTDLP (${SERVICE_NAME}) создан, запущен и добавлен в автозапуск.\e[0m"
 }
 
 # 2. Запустить
 start_service() {
-    check_sudo
     echo -e "\e[34mЗапуск сервиса ${SERVICE_NAME}...\e[0m"
-    systemctl start "$SERVICE_NAME"
+    systemctl --user start "$SERVICE_NAME"
     echo -e "\e[32mГотово.\e[0m"
 }
 
 # 3. Остановить
 stop_service() {
-    check_sudo
     echo -e "\e[34mОстановка сервиса ${SERVICE_NAME}...\e[0m"
-    systemctl stop "$SERVICE_NAME"
+    systemctl --user stop "$SERVICE_NAME"
     echo -e "\e[32mГотово.\e[0m"
 }
 
 # 4. Перезапустить
 restart_service() {
-    check_sudo
     echo -e "\e[34mПерезапуск сервиса ${SERVICE_NAME}...\e[0m"
-    systemctl restart "$SERVICE_NAME"
+    systemctl --user restart "$SERVICE_NAME"
     echo -e "\e[32mГотово.\e[0m"
 }
 
 # 5. Посмотреть статус
 status_service() {
     echo -e "\e[34m--- Статус ${SERVICE_NAME} ---\e[0m"
-    systemctl status "$SERVICE_NAME"
+    systemctl --user status "$SERVICE_NAME" --no-pager
 }
 
-# 6. Логи в реальном времени
+# 6. Логи в реальном времени (вывод бота пишется в файл, а не в journal)
 logs_service() {
-    echo -e "\e[34m--- Логи ${SERVICE_NAME} (Ctrl+C для выхода) ---\e[0m"
-    journalctl -u "$SERVICE_NAME" -f -n 50
+    echo -e "\e[34m--- Логи ${BOT_LOG} (Ctrl+C для выхода) ---\e[0m"
+    tail -n 50 -F "$BOT_LOG"
 }
 
 # 7. Отключить автостарт и полностью удалить
 delete_service() {
-    check_sudo
     echo -e "\e[31m[!] Вы уверены, что хотите полностью удалить сервис ${SERVICE_NAME}? (y/n)\e[0m"
     read -r confirm
     if [[ "$confirm" =~ ^[YyДд]$ ]]; then
         echo -e "\e[34mОстанавливаем и отключаем сервис...\e[0m"
-        systemctl stop "$SERVICE_NAME" 2>/dev/null
-        systemctl disable "$SERVICE_NAME" 2>/dev/null
+        systemctl --user stop "$SERVICE_NAME" 2>/dev/null
+        systemctl --user disable "$SERVICE_NAME" 2>/dev/null
 
         if [ -f "$SERVICE_PATH" ]; then
             rm "$SERVICE_PATH"
             echo -e "\e[34mФайл ${SERVICE_PATH} удален.\e[0m"
         fi
 
-        systemctl daemon-reload
-        systemctl reset-failed
+        systemctl --user daemon-reload
+        systemctl --user reset-failed
         echo -e "\e[32mСервис ${SERVICE_NAME} полностью удален из системы.\e[0m"
     else
         echo "Отмена."
     fi
 }
+
+check_not_root
 
 # Главный цикл меню
 while true; do
