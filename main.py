@@ -12,6 +12,7 @@ from aiogram.types import InlineKeyboardMarkup as AioInlineKeyboardMarkup, Inlin
 from aiogram.types import PreCheckoutQuery, LabeledPrice, ReplyParameters
 import aiohttp
 from aiogram.filters.command import Command
+from aiogram.exceptions import TelegramBadRequest
 from modules.database import DataBase
 from modules.keyboards import *
 from modules.state import *
@@ -520,6 +521,178 @@ async def welcome(message: Message, state: FSMContext):
         return
     await send_start_message(message)
 
+def video_chapters(info_dict: dict) -> list[dict]:
+    """Chapters from yt-dlp info as plain {start, end, title}; [] unless there are 2+."""
+    duration = float(info_dict.get('duration') or 0)
+    out = []
+    for ch in info_dict.get('chapters') or []:
+        try:
+            start = float(ch.get('start_time') or 0)
+            end = float(ch.get('end_time') or duration)
+        except (TypeError, ValueError):
+            continue
+        if end - start < 1:
+            continue
+        title = str(ch.get('title') or '').strip() or f"Chapter {len(out) + 1}"
+        out.append({'start': start, 'end': end, 'title': title[:200]})
+    return out if len(out) >= 2 else []
+
+
+def youtube_download_sizes(formats: list, duration) -> dict:
+    """Expected download size per video format id, including the audio track
+    yt-dlp merges in for video-only formats. Used to size chapters up front."""
+    duration = float(duration or 0)
+
+    def estimate(f):
+        size = f.get('filesize') or f.get('filesize_approx')
+        if not size and f.get('tbr') and duration:
+            size = float(f['tbr']) * 1000 / 8 * duration
+        return int(size or 0)
+
+    best_audio = max((estimate(f) for f in formats
+                      if f.get('vcodec') in (None, 'none') and f.get('acodec') not in (None, 'none')),
+                     default=0)
+    sizes = {}
+    for f in formats:
+        vcodec = f.get('vcodec')
+        if vcodec in (None, 'none', 'images'):
+            continue
+        video = estimate(f)
+        if not video:
+            continue
+        has_audio = f.get('acodec') not in (None, 'none')
+        sizes[str(f.get('format_id'))] = video + (0 if has_audio else best_audio)
+    return sizes
+
+
+MP3_BYTES_PER_SECOND = 128_000 // 8
+
+
+def chapter_size_estimates(data: dict, fmt: str) -> list[int]:
+    chapters = data.get('yt_chapters') or []
+    duration = float(data.get('yt_duration') or 0) or (chapters[-1]['end'] if chapters else 0)
+    if fmt == 'audio':
+        rate = MP3_BYTES_PER_SECOND
+    else:
+        total = int((data.get('yt_fmt_sizes') or {}).get(str(fmt)) or 0)
+        rate = total / duration if duration and total else 0
+    return [int(rate * (c['end'] - c['start'])) for c in chapters]
+
+
+async def split_toggle_callback(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    chapters = data.get('yt_chapters') or []
+    if not chapters or not call.message or not call.message.reply_markup:
+        await call.answer("Send me link again", show_alert=True)
+        return
+    enabled = not data.get('split')
+    await state.update_data(split=enabled)
+    text = split_toggle_text(len(chapters), enabled)
+    rows = [
+        [b.model_copy(update={'text': text}) if b.callback_data == SPLIT_TOGGLE_CB else b for b in row]
+        for row in call.message.reply_markup.inline_keyboard
+    ]
+    try:
+        await call.message.edit_reply_markup(reply_markup=AioInlineKeyboardMarkup(inline_keyboard=rows))
+    except TelegramBadRequest:
+        pass
+    await call.answer("Now pick a quality, then the chapters" if enabled else None)
+
+
+async def open_chapter_picker(call: CallbackQuery, state: FSMContext, data: dict, fmt, size, note):
+    chapters = data['yt_chapters']
+    await state.update_data(
+        yt_pick={'format': fmt, 'size': size, 'note': note},
+        yt_selected=[],
+        yt_page=0,
+        # Kept so "Back" can bring the quality menu back unchanged.
+        yt_formats_markup=call.message.reply_markup.model_dump() if call.message.reply_markup else None,
+    )
+    sizes = chapter_size_estimates(data, fmt)
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=chapters_kb(chapters, [], sizes, upload_limit_bytes(), 0))
+    except TelegramBadRequest:
+        pass
+    await call.answer(f"{note or 'Audio'}: choose chapters")
+
+
+async def chapters_callback(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    chapters = data.get('yt_chapters') or []
+    pick = data.get('yt_pick')
+    if not chapters or not pick or not call.message:
+        await call.answer("Send me link again", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    action = parts[1] if len(parts) > 1 else "noop"
+    selected = set(data.get('yt_selected') or [])
+    page = int(data.get('yt_page') or 0)
+    limit = upload_limit_bytes()
+    sizes = chapter_size_estimates(data, pick['format'])
+    allowed = {i for i, sz in enumerate(sizes) if not (sz and sz > limit)}
+
+    if action == "noop":
+        await call.answer()
+        return
+    if action == "big":
+        i = int(parts[2])
+        await call.answer(
+            f"This chapter is about {human_size(sizes[i])}, over the {human_size(limit)} limit. "
+            f"Go back and pick a lower quality.", show_alert=True)
+        return
+    if action == "back":
+        markup = data.get('yt_formats_markup')
+        await state.update_data(yt_pick=None, yt_selected=[])
+        try:
+            if markup:
+                await call.message.edit_reply_markup(reply_markup=AioInlineKeyboardMarkup.model_validate(markup))
+        except TelegramBadRequest:
+            pass
+        await call.answer()
+        return
+    if action == "go":
+        picked = [chapters[i] for i in sorted(selected) if i in allowed and i < len(chapters)]
+        if not picked:
+            await call.answer("Pick at least one chapter", show_alert=True)
+            return
+        _, work = db.get_user(call.from_user.id)
+        if work == 1:
+            await call.answer("Wait while your video is downloading", show_alert=True)
+            return
+        if not await download_allowed(call.bot, call.message.chat, call.from_user):
+            await call.answer()
+            return
+        await call.answer(f"Downloading {len(picked)} chapter(s)...")
+        await start_youtube_download(
+            call, state,
+            link=data['link'], domain=data['domain'], video_path=data['video_path'],
+            thumbnail_path=data['thumbnail_path'], title=sanitize_filename(data['title']),
+            purchase_title=data['title'], premium_mode=bool(data.get('premium')),
+            format=pick['format'], size=pick['size'], note=pick['note'], chapters=picked,
+        )
+        return
+
+    if action == "t":
+        i = int(parts[2])
+        if i in allowed:
+            selected.symmetric_difference_update({i})
+    elif action == "all":
+        selected = set(allowed)
+    elif action == "none":
+        selected = set()
+    elif action == "p":
+        page = int(parts[2])
+
+    await state.update_data(yt_selected=sorted(selected), yt_page=page)
+    try:
+        await call.message.edit_reply_markup(reply_markup=chapters_kb(chapters, selected, sizes, limit, page))
+    except TelegramBadRequest:
+        pass
+    await call.answer()
+
+
 async def youtube_download(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     _, work = db.get_user(call.from_user.id)
@@ -542,6 +715,11 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
     token = None
     if len(parts) > 4 and parts[-1].startswith("il_"):
         token = parts[-1]
+
+    # "Split into chapters" is ticked: pick the chapters first, download after.
+    if data and data.get('split') and data.get('yt_chapters') and call.message:
+        await open_chapter_picker(call, state, data, format, size, note)
+        return
 
     if not data:
         context = None
@@ -613,8 +791,21 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         thumbnail_path = data['thumbnail_path']
         title = sanitize_filename(data['title'])
         premium_mode = bool(data.get('premium'))
-    max_size = 2 * 1024 * 1024 * 1024
-    if int(size) >= max_size:
+    await start_youtube_download(
+        call, state,
+        link=link, domain=domain, video_path=video_path, thumbnail_path=thumbnail_path,
+        title=title, purchase_title=data['title'] if data else video_title,
+        premium_mode=premium_mode, format=format, size=size, note=note,
+    )
+
+
+async def start_youtube_download(call: CallbackQuery, state: FSMContext, *, link, domain, video_path,
+                                 thumbnail_path, title, purchase_title, premium_mode, format, size, note,
+                                 chapters=None):
+    """Charge (if needed) and start a YouTube download - the whole video, or
+    only the given chapters, each sent as its own file."""
+    # In chapter mode every piece is checked on its own instead.
+    if not chapters and int(size) >= upload_limit_bytes():
         if call.message:
             await call.message.answer("File is too large. Try another")
         else:
@@ -658,7 +849,6 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
                 pass
 
     if requires_payment:
-        purchase_title = data['title'] if data else video_title
         await state.update_data(purchase={
             'type': 'audio' if format == 'audio' else 'video',
             'format': format,
@@ -670,9 +860,12 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             'thumbnail_path': thumbnail_path,
             'title': purchase_title,
             'price': item_price,
+            'chapters': chapters,
         })
         suffix = ":prem" if premium_mode else ""
         item_title = ("YouTube Audio" if format == "audio" else f"YouTube {note or 'video'}") + (" • Premium" if premium_mode else "")
+        if chapters:
+            item_title += f" • {len(chapters)} chapters"
         prices = [LabeledPrice(label=item_title, amount=item_price)]
         payload = f"yt:{'audio' if format == 'audio' else 'video'}:{format}:{call.from_user.id}{suffix}:{payment_nonce()}"
         await state.update_data(purchase_payload=payload)
@@ -738,7 +931,13 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
         payment_ref=balance_ref,
     )
 
-    if format != "audio":
+    if chapters:
+        threading.Thread(
+            target=download_chapters_with_cancel,
+            args=(link, video_path, target_chat_id, domain, format, purchase_title, thumbnail_path,
+                  chapters, call.from_user.id, download_id, balance_ref),
+        ).start()
+    elif format != "audio":
         title_for_send = title  # Используем title из context или data
         # Используем новую функцию с поддержкой отмены
         my_thread = threading.Thread(
@@ -912,13 +1111,22 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
                     public_ok = False
                 premium_mode = not public_ok
                 await state.update_data(premium=premium_mode)
+                # A new link always starts with splitting off; the box is opt-in.
+                yt_chapters = video_chapters(info_dict)
+                await state.update_data(
+                    yt_chapters=yt_chapters,
+                    yt_duration=info_dict.get('duration'),
+                    yt_fmt_sizes=youtube_download_sizes(formats, info_dict.get('duration')) if yt_chapters else {},
+                    split=False, yt_pick=None, yt_selected=[],
+                )
                 is_whitelisted = is_free_user(message.from_user.id)
                 premium_price_enabled = config.stars_premium_price > 0
                 standard_price_enabled = config.stars_price > 0
                 free_user = is_whitelisted or (premium_mode and not premium_price_enabled) or ((not premium_mode) and not standard_price_enabled)
                 force_paid = premium_mode and (not is_whitelisted) and premium_price_enabled
                 price_for_buttons = config.stars_premium_price if premium_mode else config.stars_price
-                kb = youtube_formats_kb(formats, free=free_user, force_paid=force_paid, price=price_for_buttons)
+                kb = youtube_formats_kb(formats, free=free_user, force_paid=force_paid, price=price_for_buttons,
+                                       chapters_count=len(yt_chapters))
                 caption_text = "<tg-emoji emoji-id=\"5375309569905938163\">⭐</tg-emoji>"+title
                 if premium_mode:
                     if premium_price_enabled and not is_whitelisted:
@@ -1288,7 +1496,13 @@ async def on_successful_payment(message: Message, state: FSMContext):
             payment_ref=payload,
         )
 
-        if fmt != 'audio':
+        if purchase.get('chapters'):
+            thread = threading.Thread(
+                target=download_chapters_with_cancel,
+                args=(link, video_path, message.chat.id, domain, fmt, purchase['title'], thumbnail_path,
+                      purchase['chapters'], message.from_user.id, download_id, payload),
+            )
+        elif fmt != 'audio':
             thread = threading.Thread(
                 target=simple_downloader_with_cancel,
                 args=(link, video_path, message.chat.id, domain, fmt, purchase['title'], thumbnail_path, message.from_user.id, str(message.chat.id), download_id, payload),
@@ -2103,6 +2317,8 @@ async def main():
     dp.callback_query.register(ban_user, F.data.startswith("ban:"))
     dp.callback_query.register(cancel_download_callback, F.data.startswith("cancel_download:"))
     dp.callback_query.register(delete_formats_msg_callback, F.data == "delete_formats_msg")
+    dp.callback_query.register(split_toggle_callback, F.data == SPLIT_TOGGLE_CB)
+    dp.callback_query.register(chapters_callback, F.data.startswith("ytch:"))
     dp.inline_query.register(inline_query_handler)
     dp.message.register(all)
 

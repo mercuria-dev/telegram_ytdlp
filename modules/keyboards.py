@@ -269,12 +269,36 @@ def cancel_download_kb(download_id: str, *, text: str = "Cancel download") -> ty
     return kb.as_markup()
 
 
+def human_size(num_bytes) -> str:
+    size = float(num_bytes or 0)
+    if size >= 1024 ** 3:
+        return f"{size / 1024 ** 3:.1f} GB"
+    if size >= 1024 ** 2:
+        return f"{size / 1024 ** 2:.0f} MB"
+    return f"{max(size, 0) / 1024:.0f} KB"
+
+
+def _hms(seconds) -> str:
+    seconds = int(max(seconds or 0, 0))
+    h, rest = divmod(seconds, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+SPLIT_TOGGLE_CB = "ytsplit"
+
+
+def split_toggle_text(count: int, enabled: bool) -> str:
+    return f"{'☑️' if enabled else '⬜️'} Split into chapters ({count})"
+
+
 def youtube_formats_kb(
     formats,
     free: bool = True,
     force_paid: bool = False,
     price: int | None = None,
     token: str | None = None,
+    chapters_count: int = 0,
 ):
     kb = InlineKeyboardBuilder()
     best_by_note: dict[str, dict] = {}
@@ -375,6 +399,11 @@ def youtube_formats_kb(
         style = "danger" if idx in red_rows else None
         kb.row(_ikb(text, callback_data=cb, style=style, icon_custom_emoji_id=icon))
 
+    # Opt-in: with the box ticked, picking a quality opens the chapter list
+    # instead of downloading the whole video.
+    if chapters_count >= 2:
+        kb.row(_ikb(split_toggle_text(chapters_count, False), callback_data=SPLIT_TOGGLE_CB))
+
     kb.row(
         _ikb(
             "Cancel",
@@ -383,6 +412,62 @@ def youtube_formats_kb(
         )
     )
 
+    return kb.as_markup()
+
+
+CHAPTERS_PER_PAGE = 10
+
+
+def chapters_kb(chapters, selected, sizes, limit: int, page: int = 0):
+    """Chapter picker: one toggle per chapter plus select-all and download.
+
+    `sizes` holds the estimated size of each chapter for the chosen quality;
+    chapters over `limit` can't be ticked, since they could never be sent.
+    """
+    kb = InlineKeyboardBuilder()
+    selected = set(selected or [])
+    pages = max(1, (len(chapters) + CHAPTERS_PER_PAGE - 1) // CHAPTERS_PER_PAGE)
+    page = min(max(page, 0), pages - 1)
+    first = page * CHAPTERS_PER_PAGE
+
+    for i in range(first, min(first + CHAPTERS_PER_PAGE, len(chapters))):
+        ch = chapters[i]
+        title = str(ch.get("title") or f"Chapter {i + 1}")
+        if len(title) > 32:
+            title = title[:31] + "…"
+        length = _hms(ch["end"] - ch["start"])
+        size = sizes[i] if i < len(sizes) else 0
+        if size and size > limit:
+            kb.row(_ikb(f"⛔️ {title} · {length} · too big", callback_data=f"ytch:big:{i}"))
+            continue
+        mark = "✅" if i in selected else "▫️"
+        size_txt = f" · ~{human_size(size)}" if size else ""
+        kb.row(_ikb(f"{mark} {title} · {length}{size_txt}", callback_data=f"ytch:t:{i}"))
+
+    if pages > 1:
+        kb.row(
+            _ikb("◀️", callback_data=f"ytch:p:{page - 1}" if page > 0 else "ytch:noop"),
+            _ikb(f"{page + 1}/{pages}", callback_data="ytch:noop"),
+            _ikb("▶️", callback_data=f"ytch:p:{page + 1}" if page < pages - 1 else "ytch:noop"),
+        )
+
+    allowed = [i for i in range(len(chapters)) if not (i < len(sizes) and sizes[i] and sizes[i] > limit)]
+    if allowed and all(i in selected for i in allowed):
+        kb.row(_ikb("Clear selection", callback_data="ytch:none"))
+    else:
+        kb.row(_ikb("Select all", callback_data="ytch:all", icon_custom_emoji_id=EMOJI.get("check")))
+
+    if selected:
+        total = sum(sizes[i] for i in selected if i < len(sizes) and sizes[i])
+        total_txt = f" · ~{human_size(total)}" if total else ""
+        kb.row(_ikb(f"Download {len(selected)}{total_txt}", callback_data="ytch:go", style="success"))
+    else:
+        kb.row(_ikb("Pick chapters to download", callback_data="ytch:noop"))
+
+    kb.row(
+        _ikb("Back", callback_data="ytch:back"),
+        _ikb("Cancel", callback_data="delete_formats_msg", icon_custom_emoji_id=EMOJI.get("no")),
+    )
     return kb.as_markup()
 
 

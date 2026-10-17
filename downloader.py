@@ -25,7 +25,7 @@ from PIL import Image
 import json
 import requests
 from urllib.parse import quote, urlsplit, urlunsplit
-from modules.keyboards import cancel_download_kb, tge
+from modules.keyboards import cancel_download_kb, tge, human_size
 
 db = DataBase()
 
@@ -1240,6 +1240,64 @@ def ensure_jpg_thumb(thumb_path, video_path, out_base):
     return None
 
 
+def _youtube_format_choice(url, video_format):
+    """yt-dlp `-f` value for a YouTube format id picked from the quality menu.
+
+    Returns (format_spec, needs_mp4_merge, format_id) - the id can change when
+    the same quality exists in several audio languages.
+    """
+    try:
+        ck = select_cookiefile(url)
+        try:
+            info = get_info_json(url, ck)
+        except Exception:
+            info = {}
+    except Exception:
+        info = {}
+    fmts = info.get('formats', []) if isinstance(info, dict) else []
+    selected = None
+    for f in fmts:
+        if str(f.get('format_id')) == str(video_format):
+            selected = f
+            break
+
+    # Если есть набор форматов с разными языками для одного и того же качества,
+    # и среди них есть вариант с меткой (original), то для этого качества
+    # всегда берём именно (original), независимо от того, на какой язык нажал пользователь.
+    try:
+        if isinstance(selected, dict) and fmts:
+            sel_height = selected.get('height')
+            sel_fps = selected.get('fps')
+            # Посчитаем, сколько языков есть для этого качества
+            same_quality = []
+            for fm in fmts:
+                if fm.get('vcodec') == 'images':
+                    continue
+                if sel_height is not None and fm.get('height') != sel_height:
+                    continue
+                if sel_fps is not None and fm.get('fps') != sel_fps:
+                    continue
+                same_quality.append(fm)
+            if len(same_quality) > 1:
+                # Есть несколько языков -> ищем (original)
+                original_fmt = None
+                for fm in same_quality:
+                    note = (fm.get('format_note') or '').lower()
+                    # yt-dlp обычно пишет "[en-US] (original)" в конце MORE INFO
+                    if '(original)' in note or '[en-us] (original)' in note:
+                        original_fmt = fm
+                        break
+                if original_fmt is not None:
+                    selected = original_fmt
+                    video_format = selected.get('format_id', video_format)
+    except Exception:
+        pass
+
+    if selected and selected.get('acodec') and selected.get('acodec') != 'none':
+        return str(video_format), False, video_format
+    return f"{video_format}+bestaudio/best", True, video_format
+
+
 def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_format=None, title_orig="", thumb=None,
                                  user_id_for_work=None, session_id=None, download_id: str = None, payment_payload=None):
     loop = asyncio.new_event_loop()
@@ -1268,57 +1326,8 @@ def simple_downloader_with_cancel(url, output_path, chat_id, domain, video_forma
         if domain == "instagram.com":
             ydl_opts['quiet'] = True
         elif _is_youtube(url or domain):
-            try:
-                ck = select_cookiefile(url)
-                try:
-                    info = get_info_json(url, ck)
-                except Exception:
-                    info = {}
-            except Exception:
-                info = {}
-            fmts = info.get('formats', []) if isinstance(info, dict) else []
-            selected = None
-            for f in fmts:
-                if str(f.get('format_id')) == str(video_format):
-                    selected = f
-                    break
-
-            # Если есть набор форматов с разными языками для одного и того же качества,
-            # и среди них есть вариант с меткой (original), то для этого качества
-            # всегда берём именно (original), независимо от того, на какой язык нажал пользователь.
-            try:
-                if isinstance(selected, dict) and fmts:
-                    sel_height = selected.get('height')
-                    sel_fps = selected.get('fps')
-                    # Посчитаем, сколько языков есть для этого качества
-                    same_quality = []
-                    for fm in fmts:
-                        if fm.get('vcodec') == 'images':
-                            continue
-                        if sel_height is not None and fm.get('height') != sel_height:
-                            continue
-                        if sel_fps is not None and fm.get('fps') != sel_fps:
-                            continue
-                        same_quality.append(fm)
-                    if len(same_quality) > 1:
-                        # Есть несколько языков -> ищем (original)
-                        original_fmt = None
-                        for fm in same_quality:
-                            note = (fm.get('format_note') or '').lower()
-                            # yt-dlp обычно пишет "[en-US] (original)" в конце MORE INFO
-                            if '(original)' in note or '[en-us] (original)' in note:
-                                original_fmt = fm
-                                break
-                        if original_fmt is not None:
-                            selected = original_fmt
-                            video_format = selected.get('format_id', video_format)
-            except Exception:
-                pass
-
-            if selected and selected.get('acodec') and selected.get('acodec') != 'none':
-                ydl_opts['format'] = str(video_format)
-            else:
-                ydl_opts['format'] = f"{video_format}+bestaudio/best"
+            ydl_opts['format'], needs_merge, video_format = _youtube_format_choice(url, video_format)
+            if needs_merge:
                 ydl_opts['merge_output_format'] = "mp4"
             
         # Build args for yt-dlp CLI
@@ -1847,3 +1856,237 @@ def download_audio_with_cancel(video_url, output_path, chat_id, thumb, bot_usern
         except Exception:
             pass
 
+
+
+def upload_limit_bytes() -> int:
+    """Largest file the bot may send: 2000 MB through a local Bot API server,
+    50 MB through the public api.telegram.org."""
+    return (2000 if getattr(config, 'bot_api_url', '') else 50) * 1024 * 1024
+
+
+def _download_cancelled(download_id: str | None) -> bool:
+    if not download_id:
+        return False
+    try:
+        info = db.get_download_by_id(download_id)
+        return bool(info) and info[7] == 'cancelled'
+    except Exception:
+        return False
+
+
+def _cut_chapter(src, dst, start, end, *, audio: bool, download_id=None) -> bool:
+    """Copy [start, end) out of src without re-encoding.
+
+    Stream copy is near-instant even for long videos; the cut snaps to the
+    nearest keyframe before `start`, which is the same trade-off yt-dlp's own
+    --split-chapters makes.
+    """
+    cmd = ['ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+           '-ss', f"{max(float(start), 0):.3f}", '-i', src,
+           '-t', f"{max(float(end) - float(start), 0.1):.3f}"]
+    if audio:
+        cmd += ['-map', '0:a', '-c', 'copy']
+    else:
+        cmd += ['-map', '0:v?', '-map', '0:a?', '-c', 'copy',
+                '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart']
+    cmd.append(dst)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            text=True, errors='replace')
+    # Lets the Cancel button kill the cut too, not only the download.
+    if download_id and proc.pid:
+        try:
+            db.update_download_pid(download_id, proc.pid)
+        except Exception:
+            pass
+    _, err = proc.communicate()
+    if proc.returncode != 0:
+        print(f"ffmpeg chapter cut failed ({dst}): {(err or '').strip()[-500:]}")
+        return False
+    return os.path.isfile(dst) and os.path.getsize(dst) > 0
+
+
+def download_chapters_with_cancel(url, output_path, chat_id, domain, video_format, title_orig, thumb,
+                                  chapters, user_id_for_work=None, download_id: str = None,
+                                  payment_payload=None):
+    """Download a YouTube video (or its audio) once and send the picked chapters
+    as separate files.
+
+    `chapters` is a list of {"start", "end", "title"}. Every piece is measured
+    after cutting and skipped with a notice if it is over the upload limit, so
+    one oversized chapter never sinks the rest.
+    """
+    final_status = "failed"
+    audio = video_format == 'audio'
+    base = os.path.splitext(output_path)[0]
+    source = None
+    pieces = []
+    sent = 0
+    skipped = []
+    send_thumb = None
+    limit = upload_limit_bytes()
+
+    start_message_id = None
+    if download_id:
+        try:
+            info = db.get_download_by_id(download_id)
+            if info and info[8]:
+                start_message_id = info[8]
+        except Exception:
+            pass
+
+    def status(text):
+        if start_message_id:
+            update_download_message(chat_id, start_message_id, text)
+
+    try:
+        args = []
+        width = height = 0
+        if audio:
+            args += ['-f', 'bestaudio/best', '--extract-audio', '--audio-format', 'mp3',
+                     '--audio-quality', '128']
+        else:
+            fmt_spec, needs_merge, video_format = _youtube_format_choice(url, video_format)
+            args += ['-f', fmt_spec]
+            if needs_merge:
+                args += ['--merge-output-format', 'mp4']
+        args += ['-o', base + '_full.%(ext)s']
+        ck = select_cookiefile(url)
+        if ck:
+            args = ['--cookies', ck] + args
+        args += _yt_dlp_runtime_args()
+        if _is_youtube(url or domain):
+            args += _youtube_extractor_args()
+
+        dl_started = time.time()
+        proc = run_yt_dlp_process_with_pid(args + [url], download_id)
+        last_lines = deque(maxlen=50)
+        logger = _get_ytdlp_logger()
+        if proc.stdout:
+            for raw in proc.stdout:
+                line = (raw or '').rstrip('\n')
+                if line:
+                    last_lines.append(line)
+                    try:
+                        logger.info("[%s] %s", download_id, line)
+                    except Exception:
+                        pass
+        proc.wait()
+
+        if _download_cancelled(download_id):
+            final_status = "cancelled"
+            return
+        if proc.returncode != 0:
+            last = last_lines[-1] if last_lines else ''
+            raise RuntimeError(f"yt-dlp failed ({_rc_to_reason(proc.returncode)}) {last}".strip())
+
+        exts = ('.mp3',) if audio else ('.mp4', '.mkv', '.webm', '.mov')
+        source = find_produced_file(base + '_full' + exts[0], exts=exts, since=dl_started)
+        if not source:
+            raise RuntimeError("downloaded file not found")
+        ext = os.path.splitext(source)[1] or exts[0]
+
+        if not audio:
+            try:
+                probe = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                     '-show_entries', 'stream=width,height', '-of', 'csv=p=0', source],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+                w, h = (probe.stdout or '').strip().split(',')[:2]
+                width, height = int(w), int(h)
+            except Exception:
+                pass
+
+        safe_base = sanitize_filename(os.path.basename(base)) or 'video'
+        if audio:
+            send_thumb = None
+            if thumb and os.path.exists(thumb):
+                send_thumb = base + '_audio.jpg'
+                try:
+                    crop_to_square(thumb, send_thumb)
+                except Exception:
+                    send_thumb = thumb
+        else:
+            send_thumb = ensure_jpg_thumb(thumb, source, safe_base)
+
+        total = len(chapters)
+        for idx, ch in enumerate(chapters, 1):
+            if _download_cancelled(download_id):
+                final_status = "cancelled"
+                break
+            ch_title = str(ch.get('title') or f"Chapter {idx}")
+            status(f"{tge('rocket', '🚀')} Cutting chapter {idx}/{total}: {html.escape(ch_title[:80])}")
+            piece = f"{base}_ch{idx:03d}{ext}"
+            pieces.append(piece)
+            if not _cut_chapter(source, piece, ch['start'], ch['end'], audio=audio, download_id=download_id):
+                if _download_cancelled(download_id):
+                    final_status = "cancelled"
+                    break
+                skipped.append(f"{ch_title} (cut failed)")
+                continue
+
+            size = os.path.getsize(piece)
+            if size > limit:
+                skipped.append(f"{ch_title} ({human_size(size)} — over the {human_size(limit)} limit)")
+                delete_file(piece)
+                continue
+
+            caption = f"{ch_title}\n{title_orig}" if title_orig else ch_title
+            try:
+                if audio:
+                    send_file_with_repair(
+                        'sendAudio', 'audio', piece, chat_id,
+                        extra={'title': ch_title, 'performer': title_orig or None},
+                        thumb=send_thumb, exts=(ext,),
+                    )
+                else:
+                    send_file_with_repair(
+                        'sendVideo', 'video', piece, chat_id,
+                        extra={
+                            'caption': caption,
+                            'supports_streaming': 'true',
+                            'width': width or None,
+                            'height': height or None,
+                        },
+                        thumb=send_thumb, exts=(ext,),
+                    )
+                sent += 1
+            except Exception as e:
+                print(f"Failed to send chapter {idx}: {e}")
+                skipped.append(f"{ch_title} (send failed)")
+            finally:
+                delete_file(piece)
+
+        if final_status != "cancelled":
+            final_status = "completed" if sent else "failed"
+
+        if skipped:
+            lines = "\n".join(f"• {t}" for t in skipped[:30])
+            bot_api_send_message(chat_id, f"Sent {sent} of {total} chapters. Not sent:\n{lines}")
+    except Exception as e:
+        final_status = "failed"
+        print(f"Chapter download error: {e}")
+        bot_api_send_message(chat_id, f"Download failed: {str(e)[:500]}", payment_payload)
+    finally:
+        if final_status == "cancelled":
+            status(f"{tge('no', '❌')} Загрузка отменена пользователем.")
+            bot_api_send_message(chat_id, "Download cancelled.", payment_payload if not sent else None)
+        if download_id:
+            db.update_download_status(download_id, final_status)
+            db.remove_active_download(download_id)
+        if start_message_id:
+            delete_download_message(chat_id, start_message_id)
+
+        # Refund only when nothing at all was delivered.
+        if not sent and final_status != "completed" and payment_payload:
+            note, settled = auto_refund_payment(payment_payload)
+            if note:
+                bot_api_send_message(chat_id, f"Download didn't complete.{note}")
+            elif not settled:
+                bot_api_send_message(chat_id, "Download didn't complete.", payment_payload)
+
+        db.set_work(user_id_for_work or chat_id, 0)
+        for path in pieces + [source, base + '_audio.jpg']:
+            if path:
+                delete_file(path)
+        if send_thumb and send_thumb != thumb:
+            delete_file(send_thumb)
