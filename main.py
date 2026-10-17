@@ -330,28 +330,27 @@ def is_group_chat(chat) -> bool:
     return getattr(chat, 'type', None) in ("group", "supergroup")
 
 
-async def group_download_allowed(bot, chat, user, reply_to_message_id: int | None = None) -> bool:
-    """Channel subscription gate for downloads started in a group.
+async def download_allowed(bot, chat, user, reply_to_message_id: int | None = None) -> bool:
+    """Channel subscription gate, run only when the bot is about to download.
 
-    Private chats are covered by ExistsUserMiddleware on every message. In a
-    group that would mean a lookup per chat message, so instead it runs only
-    right before a download, at the same point the payment is decided - and,
-    like the payment, it is skipped for admins and the free whitelist.
+    Ordinary messages and /start are never checked, so there is no channel
+    lookup per message - only per link (and per quality button press).
     """
-    if not is_group_chat(chat) or is_free_user(user.id):
-        return True
-
     status = await subscription.channel_status(bot, user.id)
     if status == subscription.OK:
         return True
     if status == subscription.BANNED:
         return False
 
-    mention = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name or 'User')}</a>"
+    if is_group_chat(chat):
+        mention = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name or 'User')}</a>"
+        text = f"{mention}, to download videos here, please subscribe to the channel."
+    else:
+        text = "To download videos, please subscribe to the channel."
     try:
         await bot.send_message(
             chat_id=chat.id,
-            text=f"{mention}, to download videos here, please subscribe to the channel.",
+            text=text,
             reply_markup=sub_kb(),
             reply_parameters=ReplyParameters(
                 message_id=reply_to_message_id,
@@ -359,7 +358,7 @@ async def group_download_allowed(bot, chat, user, reply_to_message_id: int | Non
             ) if reply_to_message_id else None,
         )
     except Exception as e:
-        print(f"Group subscription prompt error: {e}")
+        print(f"Subscription prompt error: {e}")
     return False
 
 def other_services_price_for_user(user_id: int) -> int:
@@ -531,9 +530,9 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             await call.answer("Wait while your video is downloading")
         return
 
-    # The quality menu stays in place, so after subscribing the user just
-    # taps the button again.
-    if call.message and not await group_download_allowed(call.bot, call.message.chat, call.from_user):
+    # In a group someone else may tap a menu that was opened for another user.
+    # The menu stays in place, so after subscribing they just tap again.
+    if call.message and not await download_allowed(call.bot, call.message.chat, call.from_user):
         await call.answer()
         return
 
@@ -778,10 +777,9 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
             if work == 1:
                 await message.answer("Wait while your video is downloading")
                 return
-            # Every non-YouTube link starts downloading right away, so the group
-            # subscription gate goes here. YouTube only shows a quality menu at
-            # this point and is gated when a quality is picked.
-            if 'youtu' not in domain and not await group_download_allowed(
+            # Subscription is checked here, before any yt-dlp work or quality
+            # menu, rather than on every message.
+            if not await download_allowed(
                     message.bot, message.chat, message.from_user, message.message_id):
                 return
             random_name = random.randint(10000, 99999)

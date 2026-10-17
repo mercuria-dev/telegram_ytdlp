@@ -1,8 +1,7 @@
 # - *- coding: utf- 8 - *-
 from aiogram import BaseMiddleware
 from modules.database import DataBase
-from modules.keyboards import sub_kb, ban_kb
-from modules import subscription
+from modules.keyboards import ban_kb
 import config
 
 db = DataBase()
@@ -28,29 +27,6 @@ class ExistsUserMiddleware(BaseMiddleware):
                 except Exception as e:
                     print(f"New user log error: {e}")
 
-        chat = getattr(event, 'chat', None)
-        if chat is None:
-            msg = getattr(event, 'message', None)
-            chat = getattr(msg, 'chat', None)
-        chat_type = getattr(chat, 'type', None)
-
-        if chat_type in ("group", "supergroup") or chat_type is None:
-            return await handler(event, data)
-
-        # Groups are checked only right before a download starts (see main.py),
-        # so ordinary chat messages there never trigger a channel lookup.
-        status = await subscription.channel_status(event.bot, user_id)
-        if status == subscription.BANNED:
-            return
-        if status == subscription.OK:
-            return await handler(event, data)
-
-        try:
-            await event.bot.send_message(
-                chat_id=chat.id,
-                text="To activate the bot, please subscribe to the channel.",
-                reply_markup=sub_kb()
-            )
-        except Exception:
-            pass
-        return
+        # Channel subscription is checked only when a download is about to
+        # start (download_allowed in main.py), not on every message.
+        return await handler(event, data)
