@@ -2,6 +2,7 @@
 from aiogram import BaseMiddleware
 from modules.database import DataBase
 from modules.keyboards import sub_kb, ban_kb
+from modules import subscription
 import config
 
 db = DataBase()
@@ -36,19 +37,12 @@ class ExistsUserMiddleware(BaseMiddleware):
         if chat_type in ("group", "supergroup") or chat_type is None:
             return await handler(event, data)
 
-        channel_id = getattr(config, 'channel_id', None)
-        if not channel_id:
-            return await handler(event, data)
-
-        try:
-            user_status = await event.bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        except Exception:
-            return await handler(event, data)
-
-        if user_status.status == "kicked":
+        # Groups are checked only right before a download starts (see main.py),
+        # so ordinary chat messages there never trigger a channel lookup.
+        status = await subscription.channel_status(event.bot, user_id)
+        if status == subscription.BANNED:
             return
-
-        if user_status.status != "left":
+        if status == subscription.OK:
             return await handler(event, data)
 
         try:

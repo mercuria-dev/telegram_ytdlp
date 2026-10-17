@@ -9,7 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, InlineQuery
 from aiogram.types import InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultPhoto, FSInputFile
 from aiogram.types import InlineKeyboardMarkup as AioInlineKeyboardMarkup, InlineKeyboardButton as AioInlineKeyboardButton
-from aiogram.types import PreCheckoutQuery, LabeledPrice
+from aiogram.types import PreCheckoutQuery, LabeledPrice, ReplyParameters
 import aiohttp
 from aiogram.filters.command import Command
 from modules.database import DataBase
@@ -36,6 +36,7 @@ import os
 import html
 from modules import dlp_manager
 from modules import scheduler
+from modules import subscription
 from modules.keyboards import ban_kb
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
@@ -324,6 +325,43 @@ def is_free_user(user_id: int) -> bool:
     """Whitelist and admins never pay."""
     return is_free_whitelisted_user(user_id) or is_admin(user_id)
 
+
+def is_group_chat(chat) -> bool:
+    return getattr(chat, 'type', None) in ("group", "supergroup")
+
+
+async def group_download_allowed(bot, chat, user, reply_to_message_id: int | None = None) -> bool:
+    """Channel subscription gate for downloads started in a group.
+
+    Private chats are covered by ExistsUserMiddleware on every message. In a
+    group that would mean a lookup per chat message, so instead it runs only
+    right before a download, at the same point the payment is decided - and,
+    like the payment, it is skipped for admins and the free whitelist.
+    """
+    if not is_group_chat(chat) or is_free_user(user.id):
+        return True
+
+    status = await subscription.channel_status(bot, user.id)
+    if status == subscription.OK:
+        return True
+    if status == subscription.BANNED:
+        return False
+
+    mention = f"<a href='tg://user?id={user.id}'>{html.escape(user.first_name or 'User')}</a>"
+    try:
+        await bot.send_message(
+            chat_id=chat.id,
+            text=f"{mention}, to download videos here, please subscribe to the channel.",
+            reply_markup=sub_kb(),
+            reply_parameters=ReplyParameters(
+                message_id=reply_to_message_id,
+                allow_sending_without_reply=True,
+            ) if reply_to_message_id else None,
+        )
+    except Exception as e:
+        print(f"Group subscription prompt error: {e}")
+    return False
+
 def other_services_price_for_user(user_id: int) -> int:
     if is_free_user(user_id):
         return 0
@@ -491,6 +529,12 @@ async def youtube_download(call: CallbackQuery, state: FSMContext):
             await call.message.answer("Wait while your video is downloading")
         else:
             await call.answer("Wait while your video is downloading")
+        return
+
+    # The quality menu stays in place, so after subscribing the user just
+    # taps the button again.
+    if call.message and not await group_download_allowed(call.bot, call.message.chat, call.from_user):
+        await call.answer()
         return
 
     parts = call.data.split(":")
@@ -733,6 +777,12 @@ async def process_link_message(message: Message, state: FSMContext, link: str):
             _, work = db.get_user(message.from_user.id)
             if work == 1:
                 await message.answer("Wait while your video is downloading")
+                return
+            # Every non-YouTube link starts downloading right away, so the group
+            # subscription gate goes here. YouTube only shows a quality menu at
+            # this point and is gated when a quality is picked.
+            if 'youtu' not in domain and not await group_download_allowed(
+                    message.bot, message.chat, message.from_user, message.message_id):
                 return
             random_name = random.randint(10000, 99999)
             video_path = f"downloads/{random_name}.mp4"
@@ -1783,17 +1833,19 @@ async def inline_query_handler(query: InlineQuery, state: FSMContext):
 
 async def check_subscription(call: CallbackQuery):
     try:
-        chat_type = getattr(call.message.chat, 'type', 'private') if call.message else 'private'
-        if chat_type in ("group", "supergroup"):
-            try:
-                if call.message:
+        if call.message and is_group_chat(call.message.chat):
+            # Anyone in the group can tap it; it reports on whoever tapped.
+            status = await subscription.channel_status(call.bot, call.from_user.id)
+            if status == subscription.OK:
+                try:
                     await call.message.delete()
-            except Exception:
-                pass
-            try:
+                except Exception:
+                    pass
+                await call.answer("Subscription confirmed. Send the link or tap the quality again.", show_alert=True)
+            elif status == subscription.NOT_SUBSCRIBED:
+                await call.answer("Subscribe to the channel to download here", show_alert=True)
+            else:
                 await call.answer()
-            except Exception:
-                pass
             return
 
         user_id = call.from_user.id
