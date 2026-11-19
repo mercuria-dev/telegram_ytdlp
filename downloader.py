@@ -121,18 +121,74 @@ def _cmd_to_str(cmd: list[str]) -> str:
         return ' '.join(str(x) for x in cmd)
 
 
-def _build_ytdlp_proxy_url() -> str | None:
-    try:
-        raw_proxy_url = (getattr(config, 'yt_dlp_proxy_url', None) or '').strip()
-        if raw_proxy_url:
-            return raw_proxy_url
-        return None
-    except Exception:
-        return None
+_proxy_lock = threading.Lock()
+_proxy_index = random.randrange(1 << 16)
+_proxy_bad_until: dict[str, float] = {}
+_proxy_local = threading.local()
 
 
-def _yt_dlp_proxy_args() -> list[str]:
-    proxy_url = _build_ytdlp_proxy_url()
+def _proxy_pool() -> list[str]:
+    return list(getattr(config, 'yt_dlp_proxy_urls', None) or [])
+
+
+def next_proxy(exclude: set[str] | None = None) -> str | None:
+    """Return the next proxy in round-robin order, or None if none set.
+
+    Proxies YouTube recently bot-checked are skipped while any other one is
+    available; if every proxy is resting, plain rotation is used.
+    """
+    pool = _proxy_pool()
+    if not pool:
+        return None
+    exclude = exclude or set()
+    global _proxy_index
+    now = time.time()
+    with _proxy_lock:
+        order = [pool[(_proxy_index + i) % len(pool)] for i in range(len(pool))]
+        _proxy_index += 1
+        for p in order:
+            if p not in exclude and _proxy_bad_until.get(p, 0) <= now:
+                return p
+        for p in order:
+            if p not in exclude:
+                return p
+    return None
+
+
+def mark_proxy_bad(proxy: str) -> None:
+    cooldown = float(getattr(config, 'yt_dlp_proxy_cooldown', 1800) or 1800)
+    with _proxy_lock:
+        _proxy_bad_until[proxy] = time.time() + cooldown
+    _get_ytdlp_logger().warning("proxy %s hit a bot check; resting it for %ds",
+                                _redact_proxy_url(proxy), int(cooldown))
+
+
+def last_used_proxy() -> str | None:
+    """Proxy of the last successful captured yt-dlp run in this thread."""
+    return getattr(_proxy_local, 'proxy', None)
+
+
+def _is_bot_check(text: str) -> bool:
+    t = (text or '').lower()
+    return 'confirm you' in t and 'not a bot' in t
+
+
+def _cmd_proxy(cmd: list[str]) -> str | None:
+    for i, arg in enumerate(cmd):
+        if arg == '--proxy' and i + 1 < len(cmd):
+            return cmd[i + 1]
+    return None
+
+
+def _cmd_with_proxy(cmd: list[str], proxy: str) -> list[str]:
+    out = list(cmd)
+    i = out.index('--proxy')
+    out[i + 1] = proxy
+    return out
+
+
+def _yt_dlp_proxy_args(proxy: str | None = None) -> list[str]:
+    proxy_url = proxy or next_proxy()
     if not proxy_url:
         return []
     return ['--proxy', proxy_url]
@@ -245,11 +301,16 @@ def _youtube_extractor_args() -> list[str]:
         return []
 
 
-def _yt_dlp_runtime_args() -> list[str]:
-    """Return global yt-dlp args (JS runtime + remote EJS components), if configured."""
+def _yt_dlp_runtime_args(proxy: str | None = None) -> list[str]:
+    """Return global yt-dlp args (proxy + JS runtime + remote EJS components), if configured.
+
+    Each call takes the next proxy in turn unless `proxy` pins one. Pin it when
+    a later run reuses media URLs from an earlier one (--load-info-json): those
+    URLs only work from the IP that fetched them.
+    """
     try:
         out: list[str] = []
-        out += _yt_dlp_proxy_args()
+        out += _yt_dlp_proxy_args(proxy)
         jsr = (getattr(config, 'yt_dlp_js_runtimes', None) or '').strip()
         # Match plain `yt-dlp URL` behavior by default:
         # do NOT force a JS runtime unless explicitly configured.
@@ -289,8 +350,23 @@ def run_yt_dlp_process(args_list, capture_output: bool = False, return_stderr: b
     logger = _get_ytdlp_logger()
     cmd_str = _cmd_to_str(_sanitize_cmd_for_logging(cmd))
     if capture_output:
-        # Always capture output when caller needs to parse it
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace')
+        # Always capture output when caller needs to parse it.
+        # On a YouTube bot check, rest that proxy and retry through the others.
+        tried: set[str] = set()
+        while True:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace')
+            used = _cmd_proxy(cmd)
+            if proc.returncode == 0 or not used or not _is_bot_check(proc.stderr):
+                break
+            tried.add(used)
+            mark_proxy_bad(used)
+            alt = next_proxy(exclude=tried)
+            if not alt:
+                break
+            logger.info("retrying through proxy %s", _redact_proxy_url(alt))
+            cmd = _cmd_with_proxy(cmd, alt)
+            cmd_str = _cmd_to_str(_sanitize_cmd_for_logging(cmd))
+        _proxy_local.proxy = used if proc.returncode == 0 else None
         if proc.returncode != 0:
             reason = _rc_to_reason(proc.returncode)
             stderr_txt = (proc.stderr or '').strip()
@@ -465,11 +541,11 @@ def delete_download_message(chat_id: int, message_id: int):
         return False
 
 
-def get_info_json(url, cookiefile=None):
+def get_info_json(url, cookiefile=None, proxy=None):
     args = ["--dump-single-json", "--no-warnings", "--no-progress"]
     if cookiefile:
         args = ["--cookies", cookiefile] + args
-    args += _yt_dlp_runtime_args()
+    args += _yt_dlp_runtime_args(proxy)
     if _is_youtube(url):
         args += _youtube_extractor_args()
     args += [url]
@@ -1907,6 +1983,9 @@ def download_chapters_with_cancel(url, output_path, chat_id, domain, video_forma
     try:
         ck = select_cookiefile(url)
         info = get_info_json(url, ck)
+        # Media URLs in the saved info are tied to the IP that fetched them,
+        # so every chapter run must go through the proxy that fetched it.
+        proxy = last_used_proxy()
         with open(info_path, 'w', encoding='utf-8') as fh:
             json.dump(info, fh)
 
@@ -1923,7 +2002,7 @@ def download_chapters_with_cancel(url, output_path, chat_id, domain, video_forma
                 if str(f.get('format_id')) == str(video_format):
                     width, height = f.get('width') or 0, f.get('height') or 0
 
-        common = ['--load-info-json', info_path] + fmt_args + _yt_dlp_runtime_args()
+        common = ['--load-info-json', info_path] + fmt_args + _yt_dlp_runtime_args(proxy)
         if ck:
             common = ['--cookies', ck] + common
         safe_base = sanitize_filename(os.path.basename(base)) or 'video'

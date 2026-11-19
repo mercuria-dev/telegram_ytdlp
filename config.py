@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+import re
 
 # Load .env from the project directory (next to this file), regardless of current working directory.
 _dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -86,12 +87,19 @@ yt_dlp_channel = os.getenv('YTDLP_CHANNEL', 'stable').strip().lower()
 yt_dlp_js_runtimes = os.getenv('YTDLP_JS_RUNTIMES', '').strip()
 yt_dlp_remote_components = os.getenv('YTDLP_REMOTE_COMPONENTS', '').strip()
 
-# Optional proxy for all yt-dlp requests.
-# Examples:
-#   YTDLP_PROXY_URL=http://angel:wjOr04eN7SU4X2y@185.107.74.112:8080
-#   YTDLP_PROXY_URL=socks5://angel:wjOr04eN7SU4X2y@185.107.74.112:1080
-# Leave empty to disable proxy completely.
+# Optional proxies for all yt-dlp requests. Keep real values in .env only.
+# YTDLP_PROXY_URLS takes several proxies (comma, space or newline separated);
+# each yt-dlp run takes the next one in turn. YTDLP_PROXY_URL is a single
+# proxy, kept for older .env files. Examples:
+#   YTDLP_PROXY_URLS=http://user:pass@host:3131,http://user:pass@host:3132
+#   YTDLP_PROXY_URL=socks5://user:pass@host:1080
+# Leave both empty to disable proxy completely.
 yt_dlp_proxy_url = os.getenv('YTDLP_PROXY_URL', '').strip()
+yt_dlp_proxy_urls = [
+    p for p in re.split(r'[\s,]+', os.getenv('YTDLP_PROXY_URLS', '')) if p
+] or ([yt_dlp_proxy_url] if yt_dlp_proxy_url else [])
+# Seconds a proxy is skipped after YouTube asks it for a bot check.
+yt_dlp_proxy_cooldown = int(os.getenv('YTDLP_PROXY_COOLDOWN', '1800') or 1800)
 
 # YouTube extractor args.
 # Default uses `tv` client to avoid PO Token issues (web/android/ios often require PO tokens and/or SABR).

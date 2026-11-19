@@ -118,6 +118,7 @@ Set `BALANCE_ENABLED=0` to hide the balance entirely and bill every download thr
 | `YTDLP_CHANNEL`                | no       | `stable` | `stable` or `nightly`. Nightly builds get YouTube extractor fixes days/weeks earlier. |
 | `YTDLP_PLATFORM`               | no       | `auto`   | Which binary from `dlp/` to use: `auto`, `linux` or `windows` |
 | `YTDLP_EXECUTABLE`             | no       | —        | Absolute path to your own `yt-dlp` binary. Overrides `dlp/` selection entirely. |
+| `YTDLP_PROXY_URLS`             | no       | —        | Several proxies (comma separated), rotated per yt-dlp run: `http://user:pass@127.0.0.1:3131,http://user:pass@127.0.0.1:3132`. Takes priority over `YTDLP_PROXY_URL`. |
 | `YTDLP_PROXY_URL`              | no       | —        | Proxy for all yt-dlp requests: `http://user:pass@127.0.0.1:8080` or `socks5://user:pass@127.0.0.1:1080` |
 | `YTDLP_JS_RUNTIMES`            | no       | —        | JS runtime for YouTube challenge solving: `node` or `node:C:\Program Files\nodejs\node.exe` |
 | `YTDLP_REMOTE_COMPONENTS`      | no       | —        | Passed to `--remote-components`, e.g. `ejs:github` |
@@ -176,7 +177,7 @@ CRYPTO_DONATE_INVOICE_URL=https://t.me/CryptoBot?start=invoice-xxxx
 
 # --- yt-dlp ---
 YTDLP_CHANNEL=nightly
-YTDLP_PROXY_URL=socks5://user:pass@127.0.0.1:1080
+YTDLP_PROXY_URLS=http://user:pass@127.0.0.1:3131,http://user:pass@127.0.0.1:3132
 YTDLP_JS_RUNTIMES=node
 YTDLP_REMOTE_COMPONENTS=ejs:github
 
